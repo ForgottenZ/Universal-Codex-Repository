@@ -213,9 +213,11 @@ def collect_files(root: Path, recursive: bool) -> List[Path]:
 def sort_files(files: List[Path], sort_key: str, sort_order: str) -> List[Path]:
     reverse = sort_order == "desc"
     if sort_key == "mtime":
-        return sorted(files, key=lambda p: p.stat().st_mtime, reverse=reverse)
+        # 时间戳相同在批量图片中很常见（例如同一秒导出），
+        # 增加文件名作为次级排序键，保证结果稳定、可预测。
+        return sorted(files, key=lambda p: (p.stat().st_mtime, p.name.lower()), reverse=reverse)
     if sort_key == "ctime":
-        return sorted(files, key=lambda p: p.stat().st_ctime, reverse=reverse)
+        return sorted(files, key=lambda p: (p.stat().st_ctime, p.name.lower()), reverse=reverse)
     return sorted(files, key=lambda p: p.name.lower(), reverse=reverse)
 
 def build_plan(root: Path, rules: Rules) -> List[PlanItem]:
