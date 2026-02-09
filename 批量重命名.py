@@ -19,6 +19,7 @@
 from __future__ import annotations
 import argparse, re, sys, uuid, json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -67,6 +68,13 @@ class Rules:
     dry_run: bool = True
     preview_limit: int = 0
     export_plan: Optional[Path] = None
+
+    # 排序与序号
+    sort_key: str = "name"           # name | mtime | ctime
+    sort_order: str = "asc"          # asc | desc
+    seq_start: int = 1
+    seq_step: int = 1
+    seq_pad: int = 4
 
 @dataclass
 class PlanItem:
@@ -202,9 +210,18 @@ def collect_files(root: Path, recursive: bool) -> List[Path]:
         return [p for p in root.rglob("*") if p.is_file()]
     return [p for p in root.iterdir() if p.is_file()]
 
+def sort_files(files: List[Path], sort_key: str, sort_order: str) -> List[Path]:
+    reverse = sort_order == "desc"
+    if sort_key == "mtime":
+        return sorted(files, key=lambda p: p.stat().st_mtime, reverse=reverse)
+    if sort_key == "ctime":
+        return sorted(files, key=lambda p: p.stat().st_ctime, reverse=reverse)
+    return sorted(files, key=lambda p: p.name.lower(), reverse=reverse)
+
 def build_plan(root: Path, rules: Rules) -> List[PlanItem]:
-    files = collect_files(root, rules.recursive)
+    files = sort_files(collect_files(root, rules.recursive), rules.sort_key, rules.sort_order)
     plan: List[PlanItem] = []
+    seq_value = rules.seq_start
     for p in files:
         if p.name.startswith("__tmp_rename__"):
             continue
@@ -217,8 +234,13 @@ def build_plan(root: Path, rules: Rules) -> List[PlanItem]:
         vars_map: Dict[str, Any] = {
             "stem": stem,
             "ext": ext,
-            "name": p.name
+            "name": p.name,
+            "seq": str(seq_value).zfill(max(0, rules.seq_pad)),
+            "seq_raw": str(seq_value),
+            "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(timespec="seconds"),
+            "ctime": datetime.fromtimestamp(p.stat().st_ctime).isoformat(timespec="seconds")
         }
+        seq_value += rules.seq_step
         if rules.regex:
             g = parse_with_regex(stem, rules.regex)
             vars_map.update(g)  # 命名变量
@@ -327,7 +349,12 @@ def run_cli(args):
         suffix_sep=args.suffix_sep,
         dry_run=(not args.apply),
         preview_limit=args.preview_limit,
-        export_plan=Path(args.export_plan) if args.export_plan else None
+        export_plan=Path(args.export_plan) if args.export_plan else None,
+        sort_key=args.sort_key,
+        sort_order=args.sort_order,
+        seq_start=args.seq_start,
+        seq_step=args.seq_step,
+        seq_pad=args.seq_pad
     )
 
     plan = build_plan(root, rules)
@@ -394,7 +421,7 @@ def run_ui():
                 if it.changed:
                     changed += 1
                 name = it.src.name
-                checked = (name in prev_names) or (it.changed and name != "12-33444.bmp")
+                checked = (name in prev_names) or it.changed
                 if checked:
                     state["checked"].add(str(i))
                 sel_symbol = "☑" if checked else "☐"
@@ -423,6 +450,11 @@ def run_ui():
         r.exts = [s.strip() for s in ent_exts.get().split(",") if s.strip()]
         r.conflict = cmb_conflict.get()
         r.suffix_sep = ent_suffix.get() or "_"
+        r.sort_key = cmb_sort_key.get()
+        r.sort_order = cmb_sort_order.get()
+        r.seq_start = safe_int(ent_seq_start.get(), 1)
+        r.seq_step = safe_int(ent_seq_step.get(), 1)
+        r.seq_pad = safe_int(ent_seq_pad.get(), 4)
 
     def on_scan():
         read_rules_from_ui(); refresh_plan()
@@ -472,7 +504,7 @@ def run_ui():
     ent_tpl = ttk.Entry(frm_tpl, width=46); ent_tpl.insert(0, "{stem}"); ent_tpl.grid(row=0, column=1, sticky="we")
     ttk.Label(frm_tpl, text="切片连接符（{3+}）").grid(row=1, column=0, sticky="e")
     ent_join = ttk.Entry(frm_tpl, width=10); ent_join.insert(0, "-"); ent_join.grid(row=1, column=1, sticky="w")
-    ttk.Label(frm_tpl, text="占位示例：{1} {2} {-1} {3+} {a} {stem} {ext}；过滤：|lower|upper|title|pad=3|strip|prefix=X-|suffix=-Y|replace=old:new").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
+    ttk.Label(frm_tpl, text="占位示例：{1} {2} {-1} {3+} {a} {stem} {ext} {seq}；过滤：|lower|upper|title|pad=3|strip|prefix=X-|suffix=-Y|replace=old:new").grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
 
     frm_flt = ttk.LabelFrame(frm_opts, text="过滤")
     frm_flt.pack(side="left", fill="both", expand=True, padx=4, pady=4)
@@ -486,6 +518,17 @@ def run_ui():
     cmb_conflict = ttk.Combobox(frm_flt, values=["skip","suffix"], state="readonly", width=8); cmb_conflict.set("skip"); cmb_conflict.grid(row=3, column=1, sticky="w")
     ttk.Label(frm_flt, text="后缀分隔符").grid(row=4, column=0, sticky="e")
     ent_suffix = ttk.Entry(frm_flt, width=8); ent_suffix.insert(0, "_"); ent_suffix.grid(row=4, column=1, sticky="w")
+    ttk.Label(frm_flt, text="排序依据").grid(row=5, column=0, sticky="e")
+    cmb_sort_key = ttk.Combobox(frm_flt, values=["name","mtime","ctime"], state="readonly", width=8); cmb_sort_key.set("name"); cmb_sort_key.grid(row=5, column=1, sticky="w")
+    ttk.Label(frm_flt, text="排序顺序").grid(row=6, column=0, sticky="e")
+    cmb_sort_order = ttk.Combobox(frm_flt, values=["asc","desc"], state="readonly", width=8); cmb_sort_order.set("asc"); cmb_sort_order.grid(row=6, column=1, sticky="w")
+    ttk.Label(frm_flt, text="序号起始/步长/位数").grid(row=7, column=0, sticky="e")
+    frm_seq = ttk.Frame(frm_flt); frm_seq.grid(row=7, column=1, sticky="w")
+    ent_seq_start = ttk.Entry(frm_seq, width=5); ent_seq_start.insert(0, "1"); ent_seq_start.pack(side="left")
+    ttk.Label(frm_seq, text="/").pack(side="left")
+    ent_seq_step = ttk.Entry(frm_seq, width=5); ent_seq_step.insert(0, "1"); ent_seq_step.pack(side="left")
+    ttk.Label(frm_seq, text="/").pack(side="left")
+    ent_seq_pad = ttk.Entry(frm_seq, width=5); ent_seq_pad.insert(0, "4"); ent_seq_pad.pack(side="left")
 
     # 表格与日志
     frm_tbl = ttk.Frame(win); frm_tbl.pack(fill="both", expand=True, padx=8, pady=6)
@@ -556,7 +599,7 @@ def main():
 
     # 模板
     p.add_argument("--template", default="{stem}",
-                   help="输出模板，例：'{2}-{1}'、'{a}-{b}'、'{1}-{2}{ext}'；若模板未含 {ext} 将自动追加原扩展名")
+                   help="输出模板，例：'{2}-{1}'、'{a}-{b}'、'frame_{seq}'、'{1}-{2}{ext}'；若模板未含 {ext} 将自动追加原扩展名")
     p.add_argument("--slice-joiner", default=None, help="切片连接符（{3+} 时使用；默认用分隔符）")
 
     # 过滤/冲突
@@ -565,6 +608,11 @@ def main():
     p.add_argument("--exts", nargs="*", help="仅处理这些后缀（含点），例：.jpg .png .tar.gz")
     p.add_argument("--conflict", default="skip", choices=["skip","suffix"], help="冲突策略：skip 跳过，suffix 自动加序号")
     p.add_argument("--suffix-sep", default="_", help="自动序号分隔符，默认 '_'")
+    p.add_argument("--sort-key", default="name", choices=["name","mtime","ctime"], help="排序依据：name 文件名，mtime 修改时间，ctime 创建/元数据变更时间")
+    p.add_argument("--sort-order", default="asc", choices=["asc","desc"], help="排序顺序：asc 升序，desc 降序")
+    p.add_argument("--seq-start", type=int, default=1, help="{seq} 起始值，默认 1")
+    p.add_argument("--seq-step", type=int, default=1, help="{seq} 步长，默认 1")
+    p.add_argument("--seq-pad", type=int, default=4, help="{seq} 补零位数，默认 4（例如 0001）")
 
     # 执行/导出
     p.add_argument("--apply", action="store_true", help="实际执行改名（默认仅预览）")
