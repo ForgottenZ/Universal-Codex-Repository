@@ -15,6 +15,12 @@ NODE_MAJOR_DEFAULT="${NODE_MAJOR_DEFAULT:-20}"
 
 DATE_TAG="$(date +%Y%m%d)"
 IMAGE_TAG="luobo/alist:v${DATE_TAG}"
+IMAGE_EXPORT_NAME="alist.v$(date +%Y%m%d%H%M%S).tar"
+
+# WebDAV 上传配置（可通过环境变量覆盖）
+WEBDAV_URL="${WEBDAV_URL:-}"
+WEBDAV_USERNAME="${WEBDAV_USERNAME:-}"
+WEBDAV_PASSWORD="${WEBDAV_PASSWORD:-}"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
@@ -73,7 +79,7 @@ install_go() {
   echo "[Go] 安装完成：$(go version)"
 }
 
-echo "[1/8] 安装基础依赖（curl/git/ca-certificates 等）..."
+echo "[1/10] 安装基础依赖（curl/git/ca-certificates 等）..."
 if need_cmd apt-get; then
   as_root "apt-get update -y && apt-get install -y curl git ca-certificates gnupg lsb-release build-essential tar xz-utils"
 elif need_cmd dnf; then
@@ -87,7 +93,7 @@ else
   exit 1
 fi
 
-echo "[2/8] 安装 Docker（若已安装则跳过）..."
+echo "[2/10] 安装 Docker（若已安装则跳过）..."
 if ! need_cmd docker; then
   as_root "curl -fsSL https://get.docker.com | sh"
 fi
@@ -101,10 +107,10 @@ if ! docker info >/dev/null 2>&1; then
   DOCKER="sudo docker"
 fi
 
-echo "[3/8] 安装 Golang ..."
+echo "[3/10] 安装 Golang ..."
 install_go
 
-echo "[4/8] clone 仓库并切到分支：$BRANCH ..."
+echo "[4/10] clone 仓库并切到分支：$BRANCH ..."
 if [ -d "${CLONE_DIR}/.git" ]; then
   git -C "$CLONE_DIR" fetch --all --prune
   git -C "$CLONE_DIR" checkout "$BRANCH"
@@ -113,7 +119,7 @@ else
   git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CLONE_DIR"
 fi
 
-echo "[5/8] 解析项目所需 pnpm / Node 版本（从 alist-web/package.json）..."
+echo "[5/10] 解析项目所需 pnpm / Node 版本（从 alist-web/package.json）..."
 PKG_JSON="${CLONE_DIR}/alist-web/package.json"
 PNPM_VERSION=""
 NODE_MAJOR=""
@@ -133,7 +139,7 @@ NODE_MAJOR="${NODE_MAJOR:-$NODE_MAJOR_DEFAULT}"
 echo "  - 将使用 Node 主版本：${NODE_MAJOR}"
 echo "  - 将激活 pnpm 版本：${PNPM_VERSION}"
 
-echo "[6/8] 安装 Node.js（nvm）并启用/激活 pnpm（corepack）..."
+echo "[6/10] 安装 Node.js（nvm）并启用/激活 pnpm（corepack）..."
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
   curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
@@ -151,7 +157,7 @@ else
   npm i -g "pnpm@${PNPM_VERSION}"
 fi
 
-echo "[7/8] 执行 run_me_to_autobuild.sh -update ..."
+echo "[7/10] 执行 run_me_to_autobuild.sh -update ..."
 AUTO_SCRIPT="$(find "$CLONE_DIR" -maxdepth 4 -name run_me_to_autobuild.sh | head -n1 || true)"
 if [ -z "$AUTO_SCRIPT" ]; then
   echo "错误：未在仓库中找到 run_me_to_autobuild.sh（请确认该分支确实包含该脚本）。"
@@ -162,7 +168,7 @@ SCRIPT_DIR="$(cd "$(dirname "$AUTO_SCRIPT")" && pwd)"
 cd "$SCRIPT_DIR"
 bash "./$(basename "$AUTO_SCRIPT")" -update
 
-echo "[8/8] Docker build：${IMAGE_TAG}"
+echo "[8/10] Docker build：${IMAGE_TAG}"
 # 优先在脚本所在目录构建；若这里没 Dockerfile，则尝试找一个 Dockerfile 并在其目录构建
 if [ ! -f "$SCRIPT_DIR/Dockerfile" ]; then
   DF="$(find "$CLONE_DIR" -maxdepth 4 -name Dockerfile | head -n1 || true)"
@@ -174,8 +180,23 @@ fi
 
 $DOCKER build -t "$IMAGE_TAG" .
 
+echo "[9/10] 导出 Docker 镜像：${IMAGE_EXPORT_NAME}"
+$DOCKER save -o "$IMAGE_EXPORT_NAME" "$IMAGE_TAG"
+
+echo "[10/10] 通过 WebDAV 上传镜像..."
+if [ -z "$WEBDAV_URL" ] || [ -z "$WEBDAV_USERNAME" ] || [ -z "$WEBDAV_PASSWORD" ]; then
+  echo "错误：缺少 WebDAV 配置。请设置 WEBDAV_URL / WEBDAV_USERNAME / WEBDAV_PASSWORD。"
+  echo "示例：WEBDAV_URL='https://dav.example.com/backup/' WEBDAV_USERNAME='user' WEBDAV_PASSWORD='pass' ./go.sh"
+  exit 1
+fi
+
+UPLOAD_URL="${WEBDAV_URL%/}/${IMAGE_EXPORT_NAME}"
+curl --fail --show-error --silent --user "${WEBDAV_USERNAME}:${WEBDAV_PASSWORD}" -T "$IMAGE_EXPORT_NAME" "$UPLOAD_URL"
+
 echo "✅ 完成：$IMAGE_TAG"
 echo "   构建目录：$SCRIPT_DIR"
+echo "   导出文件：$IMAGE_EXPORT_NAME"
+echo "   上传地址：$UPLOAD_URL"
 echo "   Go：$(go version)"
 echo "   Node：$(node -v)"
 echo "   pnpm：$(pnpm -v)"
