@@ -265,24 +265,78 @@ def send_pushdeer(user: User, text: str):
         log(f"Pushdeer异常 user={user.username} error={exc}", "ERROR")
 
 
-def _acquire_graph_token(user: User) -> tuple[str | None, bool]:
-    authority = f"https://login.microsoftonline.com/{user.tenant_id or 'common'}"
-    scopes = ["https://graph.microsoft.com/.default"]
+def _normalize_scopes(scopes):
+    vals = scopes or []
+    out = []
+    for sc in vals:
+        t = str(sc).strip()
+        if not t:
+            continue
+        if "://" in t:
+            out.append(t)
+        else:
+            out.append(f"https://graph.microsoft.com/{t}")
+    return out
 
-    # 优先应用凭据模式（与现有配置兼容）
-    if user.client_secret:
+
+def _resolve_email_profile(user: User) -> dict:
+    cfg = load_config().get("email", {}) or {}
+    enable = bool(cfg.get("enable", user.email_enabled))
+    auth_type = str(cfg.get("auth_type", "oauth2")).strip().lower()
+
+    username = (cfg.get("username") or user.sender_email or "").strip()
+    from_addr = (cfg.get("from_addr") or username).strip()
+
+    tenant_id = (cfg.get("tenant_id") or user.tenant_id or "consumers").strip()
+    authority = (cfg.get("authority") or f"https://login.microsoftonline.com/{tenant_id}").strip()
+    client_id = (cfg.get("client_id") or user.client_id or "").strip()
+    client_secret = (cfg.get("client_secret") or user.client_secret or "").strip()
+
+    configured_scopes = cfg.get("scopes")
+    if configured_scopes:
+        scopes = _normalize_scopes(configured_scopes)
+    elif client_secret:
+        scopes = ["https://graph.microsoft.com/.default"]
+    else:
+        scopes = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read", "offline_access"]
+
+    return {
+        "enable": enable,
+        "auth_type": auth_type,
+        "username": username,
+        "from_addr": from_addr,
+        "authority": authority,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scopes": scopes,
+    }
+
+
+def _acquire_graph_token(user: User, profile: dict) -> tuple[str | None, bool]:
+    authority = profile["authority"]
+    scopes = profile["scopes"]
+    client_id = profile["client_id"]
+    client_secret = profile["client_secret"]
+
+    if not client_id:
+        log(f"Graph配置缺失 client_id user={user.username}", "ERROR")
+        return None, True
+
+    # auth_type=oath2 且带 client_secret 时优先应用凭据
+    if client_secret:
         app_client = msal.ConfidentialClientApplication(
-            client_id=user.client_id,
-            client_credential=user.client_secret,
+            client_id=client_id,
+            client_credential=client_secret,
             authority=authority,
         )
-        token = app_client.acquire_token_for_client(scopes=scopes)
+        token = app_client.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
         if "access_token" in token:
             return token.get("access_token"), False
         log(f"Graph应用凭据取token失败 user={user.username} detail={token.get('error_description') or token}", "WARN")
 
-    # 回退设备码模式（参考 notify01.py 思路）
-    cache_file = BASE_DIR / f"msal_cache_user_{user.id}.bin"
+    # 参考 notify01.py：设备码 + token cache
+    safe_name = "".join(ch for ch in (profile.get("username") or user.username) if ch.isalnum() or ch in ('-','_','.'))
+    cache_file = BASE_DIR / f"msal_cache_{safe_name}.bin"
     cache = msal.SerializableTokenCache()
     if cache_file.exists():
         try:
@@ -290,9 +344,12 @@ def _acquire_graph_token(user: User) -> tuple[str | None, bool]:
         except Exception as exc:
             log(f"MSAL缓存读取失败 user={user.username} error={exc}", "WARN")
 
-    pca = msal.PublicClientApplication(client_id=user.client_id, authority=authority, token_cache=cache)
-    accounts = pca.get_accounts()
-    token = pca.acquire_token_silent(scopes, account=accounts[0] if accounts else None)
+    pca = msal.PublicClientApplication(client_id=client_id, authority=authority, token_cache=cache)
+    account = None
+    accounts = pca.get_accounts(username=profile.get("username")) or pca.get_accounts()
+    if accounts:
+        account = accounts[0]
+    token = pca.acquire_token_silent(scopes, account=account)
     if not token:
         flow = pca.initiate_device_flow(scopes=scopes)
         if "user_code" not in flow:
@@ -314,11 +371,17 @@ def _acquire_graph_token(user: User) -> tuple[str | None, bool]:
 
 
 def send_graph_email(user: User, text: str):
-    if not user.email_enabled or not user.sender_email or not user.client_id:
-        log(f"Graph邮件跳过 user={user.username}（未启用或配置不完整）", "WARN")
+    profile = _resolve_email_profile(user)
+    if not profile["enable"]:
+        log(f"Graph邮件跳过 user={user.username}（email.enable=false）", "WARN")
         return
 
-    token, is_delegated = _acquire_graph_token(user)
+    sender = profile.get("from_addr") or profile.get("username")
+    if not sender:
+        log(f"Graph邮件跳过 user={user.username}（缺少 from_addr/username）", "WARN")
+        return
+
+    token, is_delegated = _acquire_graph_token(user, profile)
     if not token:
         return
 
@@ -326,12 +389,13 @@ def send_graph_email(user: User, text: str):
         "message": {
             "subject": "教学周提醒",
             "body": {"contentType": "Text", "content": text},
-            "toRecipients": [{"emailAddress": {"address": user.sender_email}}],
+            "toRecipients": [{"emailAddress": {"address": sender}}],
+            "from": {"emailAddress": {"address": sender}},
         },
         "saveToSentItems": True,
     }
 
-    url = "https://graph.microsoft.com/v1.0/me/sendMail" if is_delegated else f"https://graph.microsoft.com/v1.0/users/{user.sender_email}/sendMail"
+    url = "https://graph.microsoft.com/v1.0/me/sendMail" if is_delegated else f"https://graph.microsoft.com/v1.0/users/{sender}/sendMail"
     try:
         r = requests.post(
             url,
@@ -342,7 +406,7 @@ def send_graph_email(user: User, text: str):
         if r.status_code not in (200, 202):
             log(f"Graph邮件发送失败 user={user.username} status={r.status_code} body={(r.text or '')[:500]}", "ERROR")
         else:
-            log(f"Graph邮件发送成功 user={user.username} mode={'delegated' if is_delegated else 'app'}")
+            log(f"Graph邮件发送成功 user={user.username} mode={'delegated' if is_delegated else 'app'} sender={sender}")
     except Exception as exc:
         log(f"Graph邮件异常 user={user.username} error={exc}", "ERROR")
 

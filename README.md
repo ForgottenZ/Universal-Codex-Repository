@@ -10,6 +10,7 @@
   - 通知方式（Pushdeer、Graph）按用户独立保存；
   - 每周报告模板、发送时间按用户独立保存。
 - **登录后才能操作**：未登录无法访问主页和所有操作接口。
+- **按时间日志**：运行日志写入 `logs/app-YYYYMMDD.log`。
 
 ## Build / 运行
 
@@ -24,6 +25,30 @@ python app.py
 
 - 第一次启动会进入管理员创建页。
 - 创建管理员后，使用该账号登录。
+
+## 邮件发送配置（Graph）
+
+除了页面里的用户邮件配置外，也支持在 `config.yaml` 配置 `email` 段（优先级更高）：
+
+```yaml
+email:
+  enable: true
+  username: no-reply_xxx@outlook.com
+  from_addr: no-reply_xxx@outlook.com
+  auth_type: oauth2
+  tenant_id: consumers
+  authority: https://login.microsoftonline.com/consumers
+  client_id: <your-client-id>
+  client_secret: ""   # 留空时会走设备码登录
+  scopes:
+    - Mail.Send
+    - User.Read
+```
+
+说明：
+- `client_secret` 存在时优先走应用凭据；失败后回退设备码。
+- `client_secret` 为空时直接走设备码（首次会在日志里打印登录提示）。
+- `scopes` 可写 `Mail.Send` / `User.Read`，程序会自动补全为 Graph scope URL。
 
 ## 说明
 
