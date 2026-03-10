@@ -1,47 +1,17 @@
 # 教学周日历与提醒系统（WebUI）
 
-这是一个基于 Python 的教学周日历管理程序，包含 WebUI、登录鉴权、事件调度、每周报告、Pushdeer 通知、Microsoft Graph 邮件通知，并支持 MySQL/SQLite 自动切换。
+## 新增核心能力
 
-## 功能概览
+- **首次启动管理员引导**：若系统中无管理员，自动跳转到 `/setup-admin` 创建管理员。
+- **至少一个管理员约束**：删除管理员时会检查，系统始终至少保留一个管理员。
+- **管理员用户管理**：管理员可创建/删除用户。
+- **多用户数据隔离**：
+  - 事件按用户独立保存；
+  - 通知方式（Pushdeer、Graph）按用户独立保存；
+  - 每周报告模板、发送时间按用户独立保存。
+- **登录后才能操作**：未登录无法访问主页和所有操作接口。
 
-- 登录系统：未登录不可访问管理页面与操作接口。
-- 教学周日历展示（按“第X教学周 + 周X”显示）。
-- 可配置学期开始/结束日期，自动计算最大教学周。
-- 事件系统：
-  - **单次事件**：第X教学周-周X-时分触发。
-  - **循环事件**：按 X教学周 / X天 / X小时 / X分钟 间隔循环触发。
-  - **覆盖事件**：指定开始与结束时刻，在区间内视为“发生中”。
-- 新增事件时按类型动态显示字段：
-  - 单次：只显示基础时间字段
-  - 循环：显示循环间隔字段
-  - 覆盖：显示结束时间字段
-- 提醒通道：
-  - Pushdeer（需 pushkey）
-  - Microsoft Graph（OAuth2 应用凭据）
-- 每周报告：
-  - 默认每周一 12:00 发送（可配置多个发送时间）
-  - 报告可使用变量模板并在发送时替换
-- 测试通知：可在页面手动发送测试消息（选择 Pushdeer / Email）。
-- 配置文件自动生成：首次运行若无 `config.yaml`，自动生成默认配置。
-- 数据库自动选择：
-  - 若 `config.yaml` 的 `database.mysql.enabled=true` 使用 MySQL
-  - 否则自动使用 SQLite（`calendar.db`）
-- 修复 APScheduler 上下文问题：后台任务使用 `app.app_context()` 避免 “Working outside of application context” 报错。
-
-## 项目结构
-
-```bash
-.
-├── app.py
-├── templates/
-│   ├── index.html
-│   └── login.html
-├── notify01.py
-├── requirements.txt
-└── README.md
-```
-
-## Build / 运行步骤
+## Build / 运行
 
 ```bash
 python -m venv .venv
@@ -50,30 +20,13 @@ pip install -r requirements.txt
 python app.py
 ```
 
-打开：`http://127.0.0.1:5000`
+访问 `http://127.0.0.1:5000`。
 
-默认登录账号密码（首次自动生成配置后）：
-- username: `admin`
-- password: `admin123`
+- 第一次启动会进入管理员创建页。
+- 创建管理员后，使用该账号登录。
 
-> 请上线前在 `config.yaml` 中修改 `auth.username` / `auth.password`。
+## 说明
 
-## 配置重点
-
-- `auth.username` / `auth.password`：系统登录账号
-- `user.username`：真名
-- `user.nickname`：称呼
-- `notify.pushdeer.*`
-- `notify.microsoft_graph.*`
-- `weekly_report.schedules`
-- `weekly_report.template`
-
-## 模板变量
-
-`{UserNickname}` `{NowTeachWeek}` `{MaxTeachWeek}` `{ProgressBar}` `{CurrentWeekEvents}` `{FutureWeeks}` `{FutureEvents}` `{Notes}`
-
-## 启动命令
-
-```bash
-python app.py
-```
+- 学期时间仍为全局配置（系统级）。
+- 用户通知配置、报告配置、事件数据都是用户级隔离。
+- 调度器任务运行在 `app.app_context()` 中，避免后台任务上下文报错。

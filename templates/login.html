@@ -16,10 +16,8 @@
       {% if messages %}<ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>{% endif %}
     {% endwith %}
     <form method="post" action="/login">
-      <label>账号</label>
-      <input name="username" required />
-      <label>密码</label>
-      <input type="password" name="password" required />
+      <label>账号</label><input name="username" required />
+      <label>密码</label><input type="password" name="password" required />
       <button type="submit">登录</button>
     </form>
   </div>

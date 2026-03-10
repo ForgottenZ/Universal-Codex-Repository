@@ -16,13 +16,11 @@
 </head>
 <body>
   <div style="display:flex;justify-content:space-between;align-items:center;">
-    <h1>{{ cfg.teaching_calendar.term_name }}</h1>
+    <h1>{{ cfg.teaching_calendar.term_name }}（当前用户：{{ user.username }} / {{ user.nickname }}）</h1>
     <form method="post" action="/logout" style="width:180px;"><button type="submit">退出登录</button></form>
   </div>
   {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>
-    {% endif %}
+    {% if messages %}<ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>{% endif %}
   {% endwith %}
 
   <div class="grid">
@@ -33,35 +31,70 @@
         {% for w in cal %}
         <tr>
           <td>第{{ w.week }}教学周</td>
-          {% for d in w.days %}
-          <td>{{ d.month }}/{{ d.date }}</td>
-          {% endfor %}
+          {% for d in w.days %}<td>{{ d.month }}/{{ d.date }}</td>{% endfor %}
         </tr>
         {% endfor %}
       </table>
     </div>
 
     <div class="card">
-      <h2>系统配置</h2>
+      <h2>当前用户配置（通知方式独立）</h2>
       <form method="post" action="/config">
-        <label>用户名(真名)</label><input name="username" value="{{ cfg.user.username }}" />
-        <label>UserNickname(称呼)</label><input name="nickname" value="{{ cfg.user.nickname }}" />
+        <label>称呼(UserNickname)</label><input name="nickname" value="{{ user.nickname }}" />
         <label>学期名</label><input name="term_name" value="{{ cfg.teaching_calendar.term_name }}" />
         <label>开始日期</label><input type="date" name="start_date" value="{{ cfg.teaching_calendar.start_date }}" />
         <label>结束日期</label><input type="date" name="end_date" value="{{ cfg.teaching_calendar.end_date }}" />
-        <label><input type="checkbox" name="push_enabled" {% if cfg.notify.pushdeer.enabled %}checked{% endif %}/> 启用Pushdeer</label>
-        <label>Pushkey</label><input name="pushkey" value="{{ cfg.notify.pushdeer.pushkey }}" />
-        <label>每周报告模板（支持变量：UserNickname/NowTeachWeek/MaxTeachWeek/ProgressBar/CurrentWeekEvents/FutureEvents/Notes）</label>
-        <textarea name="weekly_template" rows="8">{{ cfg.weekly_report.template }}</textarea>
+        <hr/>
+        <label><input type="checkbox" name="push_enabled" {% if user.push_enabled %}checked{% endif %}/> 启用Pushdeer</label>
+        <label>Pushkey</label><input name="pushkey" value="{{ user.pushkey or '' }}" />
+        <label><input type="checkbox" name="email_enabled" {% if user.email_enabled %}checked{% endif %}/> 启用Microsoft Graph邮件</label>
+        <label>Tenant ID</label><input name="tenant_id" value="{{ user.tenant_id or 'common' }}" />
+        <label>Client ID</label><input name="client_id" value="{{ user.client_id or '' }}" />
+        <label>Client Secret</label><input name="client_secret" value="{{ user.client_secret or '' }}" />
+        <label>Sender Email</label><input name="sender_email" value="{{ user.sender_email or '' }}" />
+        <hr/>
+        <label><input type="checkbox" name="weekly_enabled" {% if user.weekly_enabled %}checked{% endif %}/> 启用每周报告</label>
+        <label>周报星期（mon~sun）</label><input name="weekly_weekday" value="{{ user.weekly_schedule_weekday or 'mon' }}" />
+        <label>周报时间（HH:MM）</label><input name="weekly_time" value="{{ user.weekly_schedule_time or '12:00' }}" />
+        <label>未来周数</label><input type="number" name="future_weeks" value="{{ user.weekly_future_weeks or 3 }}" />
+        <label>每周报告模板</label>
+        <textarea name="weekly_template" rows="6">{{ user.weekly_template }}</textarea>
         <button type="submit">保存配置</button>
       </form>
     </div>
   </div>
 
+  {% if user.is_admin %}
+  <div class="card" style="margin-top:20px;">
+    <h2>管理员 - 用户管理（至少保留一个管理员）</h2>
+    <form method="post" action="/admin/users">
+      <div class="grid">
+        <div>
+          <label>用户名</label><input name="username" required />
+          <label>称呼</label><input name="nickname" required />
+          <label>密码</label><input type="password" name="password" required />
+          <label><input type="checkbox" name="is_admin" /> 设为管理员</label>
+          <button type="submit">创建用户</button>
+        </div>
+        <div>
+          <ul>
+            {% for u in users %}
+            <li>
+              {{ u.username }} / {{ u.nickname }} {% if u.is_admin %}(管理员){% endif %}
+              <form method="post" action="/admin/users/{{u.id}}/delete" style="display:inline;"><button type="submit" style="width:auto;">删除</button></form>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
   <div class="grid" style="margin-top:20px;">
     <div class="card">
-      <h2>新增事件</h2>
-      <form method="post" action="/events" id="event-form">
+      <h2>新增事件（仅保存到当前用户）</h2>
+      <form method="post" action="/events">
         <label>名称</label><input name="name" required />
         <label>类型</label>
         <select name="event_type" id="event_type">
@@ -75,7 +108,7 @@
         <label>开始分</label><input type="number" name="start_minute" value="0" min="0" max="59" />
 
         <div id="range-fields" class="hidden">
-          <label>结束：第X教学周(覆盖事件用)</label><input type="number" name="end_week" />
+          <label>结束：第X教学周</label><input type="number" name="end_week" />
           <label>结束：周X(1-7)</label><input type="number" name="end_weekday" />
           <label>结束时</label><input type="number" name="end_hour" />
           <label>结束分</label><input type="number" name="end_minute" />
@@ -97,20 +130,18 @@
     </div>
 
     <div class="card">
-      <h2>测试通知</h2>
+      <h2>测试通知（当前用户）</h2>
       <form method="post" action="/test-notify">
         <label><input type="checkbox" name="use_push" checked /> Pushdeer</label>
         <label><input type="checkbox" name="use_email" checked /> Email</label>
-        <label>测试内容</label>
-        <textarea name="content" rows="4">这是一条测试通知。</textarea>
+        <label>测试内容</label><textarea name="content" rows="4">这是一条测试通知。</textarea>
         <button type="submit">发送测试通知</button>
       </form>
 
-      <h2>事件列表</h2>
+      <h2>我的事件列表</h2>
       <ul>
       {% for e in events %}
-        <li>
-          [{{ e.event_type }}] {{ e.name }} - 第{{ e.start_week }}教学周 周{{ e.start_weekday }} {{ '%02d'|format(e.start_hour) }}:{{ '%02d'|format(e.start_minute) }}
+        <li>[{{ e.event_type }}] {{ e.name }}
           <form method="post" action="/events/{{e.id}}/delete" style="display:inline;"><button type="submit" style="width:auto;">删除</button></form>
         </li>
       {% else %}
@@ -121,16 +152,16 @@
   </div>
 
 <script>
-  const typeEl = document.getElementById('event_type');
-  const recurring = document.getElementById('recurring-fields');
-  const range = document.getElementById('range-fields');
-  function updateFields() {
-    const t = typeEl.value;
-    recurring.classList.toggle('hidden', t !== 'recurring');
-    range.classList.toggle('hidden', t !== 'range');
-  }
-  typeEl.addEventListener('change', updateFields);
-  updateFields();
+const typeEl = document.getElementById('event_type');
+const recurring = document.getElementById('recurring-fields');
+const range = document.getElementById('range-fields');
+function updateFields() {
+  const t = typeEl.value;
+  recurring.classList.toggle('hidden', t !== 'recurring');
+  range.classList.toggle('hidden', t !== 'range');
+}
+typeEl.addEventListener('change', updateFields);
+updateFields();
 </script>
 </body>
 </html>

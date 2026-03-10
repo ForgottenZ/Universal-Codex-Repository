@@ -20,8 +20,6 @@ CONFIG_PATH = BASE_DIR / "config.yaml"
 
 DEFAULT_CONFIG = {
     "app": {"secret_key": "replace-this-secret"},
-    "auth": {"username": "admin", "password": "admin123"},
-    "user": {"username": "hax", "nickname": "Hax"},
     "teaching_calendar": {
         "term_name": "2025-2026学年(春)",
         "start_date": "2025-03-03",
@@ -36,23 +34,6 @@ DEFAULT_CONFIG = {
             "password": "",
             "database": "teaching_calendar",
         }
-    },
-    "notify": {
-        "pushdeer": {"enabled": False, "pushkey": ""},
-        "microsoft_graph": {
-            "enabled": False,
-            "tenant_id": "common",
-            "client_id": "",
-            "client_secret": "",
-            "sender_email": "",
-            "scopes": ["https://graph.microsoft.com/.default"],
-        },
-    },
-    "weekly_report": {
-        "enabled": True,
-        "future_weeks": 3,
-        "schedules": [{"weekday": "mon", "time": "12:00"}],
-        "template": "Hi, {UserNickname}!\\n现在是第{NowTeachWeek}教学周！{ProgressBar} {NowTeachWeek}/{MaxTeachWeek}\\n您本周的事件有：\\n{CurrentWeekEvents}\\n您未来{FutureWeeks}周的事件有：\\n{FutureEvents}\\n详细说明：\\n{Notes}",
     },
 }
 
@@ -83,8 +64,35 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False)
+    password = db.Column(db.String(128), nullable=False)
+    nickname = db.Column(db.String(64), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False)
+
+    push_enabled = db.Column(db.Boolean, default=False)
+    pushkey = db.Column(db.String(256), default="")
+
+    email_enabled = db.Column(db.Boolean, default=False)
+    tenant_id = db.Column(db.String(128), default="common")
+    client_id = db.Column(db.String(128), default="")
+    client_secret = db.Column(db.String(256), default="")
+    sender_email = db.Column(db.String(256), default="")
+
+    weekly_enabled = db.Column(db.Boolean, default=True)
+    weekly_future_weeks = db.Column(db.Integer, default=3)
+    weekly_schedule_weekday = db.Column(db.String(16), default="mon")
+    weekly_schedule_time = db.Column(db.String(16), default="12:00")
+    weekly_template = db.Column(
+        db.Text,
+        default="Hi, {UserNickname}!\\n现在是第{NowTeachWeek}教学周！{ProgressBar} {NowTeachWeek}/{MaxTeachWeek}\\n您本周的事件有：\\n{CurrentWeekEvents}\\n您未来{FutureWeeks}周的事件有：\\n{FutureEvents}\\n详细说明：\\n{Notes}",
+    )
+
+
 class Event(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     name = db.Column(db.String(128), nullable=False)
     event_type = db.Column(db.String(20), nullable=False, default="one_time")
     note = db.Column(db.Text, default="")
@@ -111,6 +119,7 @@ class Event(db.Model):
 
 class NotifyLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     kind = db.Column(db.String(32), nullable=False)
     event_id = db.Column(db.Integer, nullable=True)
     unique_key = db.Column(db.String(128), unique=True, nullable=False)
@@ -125,14 +134,37 @@ class TeachTime:
     minute: int
 
 
+def current_user() -> User | None:
+    uid = session.get("user_id")
+    if not uid:
+        return None
+    return db.session.get(User, uid)
+
+
 def login_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if not session.get("logged_in"):
+        if not session.get("user_id"):
             return redirect(url_for("login"))
         return func(*args, **kwargs)
 
     return wrapper
+
+
+def admin_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not user or not user.is_admin:
+            flash("仅管理员可执行该操作")
+            return redirect(url_for("index"))
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def has_admin() -> bool:
+    return User.query.filter_by(is_admin=True).first() is not None
 
 
 def term_dates():
@@ -195,68 +227,51 @@ def progress_bar(current: int, maximum: int) -> str:
     return "[" + "■" * full + "□" * (10 - full) + "]"
 
 
-def send_pushdeer(text: str):
-    cfg = load_config()["notify"]["pushdeer"]
-    if cfg.get("enabled") and cfg.get("pushkey"):
+def send_pushdeer(user: User, text: str):
+    if user.push_enabled and user.pushkey:
         requests.get(
             "https://api2.pushdeer.com/message/push",
-            params={"pushkey": cfg["pushkey"], "text": "教学周提醒", "desp": text},
+            params={"pushkey": user.pushkey, "text": "教学周提醒", "desp": text},
             timeout=10,
         )
 
 
-def graph_token(cfg: dict) -> str | None:
+def graph_token(user: User) -> str | None:
     app_client = msal.ConfidentialClientApplication(
-        client_id=cfg["client_id"],
-        client_credential=cfg["client_secret"],
-        authority=f"https://login.microsoftonline.com/{cfg['tenant_id']}",
+        client_id=user.client_id,
+        client_credential=user.client_secret,
+        authority=f"https://login.microsoftonline.com/{user.tenant_id or 'common'}",
     )
-    token = app_client.acquire_token_for_client(scopes=cfg["scopes"])
+    token = app_client.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
     return token.get("access_token")
 
 
-def send_graph_email(text: str):
-    cfg = load_config()["notify"]["microsoft_graph"]
-    if not cfg.get("enabled") or not cfg.get("sender_email"):
+def send_graph_email(user: User, text: str):
+    if not user.email_enabled or not user.sender_email or not user.client_id or not user.client_secret:
         return
-    token = graph_token(cfg)
+    token = graph_token(user)
     if not token:
         return
     payload = {
         "message": {
             "subject": "教学周提醒",
             "body": {"contentType": "Text", "content": text},
-            "toRecipients": [{"emailAddress": {"address": cfg["sender_email"]}}],
+            "toRecipients": [{"emailAddress": {"address": user.sender_email}}],
         }
     }
     requests.post(
-        f"https://graph.microsoft.com/v1.0/users/{cfg['sender_email']}/sendMail",
+        f"https://graph.microsoft.com/v1.0/users/{user.sender_email}/sendMail",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         data=json.dumps(payload),
         timeout=15,
     )
 
 
-def send_notification(content: str, use_push: bool, use_email: bool):
+def send_notification(user: User, content: str, use_push: bool, use_email: bool):
     if use_push:
-        send_pushdeer(content)
+        send_pushdeer(user, content)
     if use_email:
-        send_graph_email(content)
-
-
-def notify_due_events():
-    with app.app_context():
-        now = datetime.now().replace(second=0, microsecond=0)
-        for event in Event.query.all():
-            if not event_matches_now(event, now):
-                continue
-            key = f"event-{event.id}-{now.strftime('%Y%m%d%H%M')}"
-            if NotifyLog.query.filter_by(unique_key=key).first():
-                continue
-            text = event.remind_text or f"事件提醒：{event.name}"
-            send_notification(text, event.remind_push, event.remind_email)
-            db.session.add(NotifyLog(kind="event", event_id=event.id, unique_key=key))
-            db.session.commit()
+        send_graph_email(user, content)
 
 
 def format_event_brief(event: Event, now_week: int) -> str:
@@ -275,13 +290,11 @@ def format_event_brief(event: Event, now_week: int) -> str:
     return f"{event.name}：第{event.start_week}教学周-第{event.end_week}教学周{progress_bar(done, span)} {done}/{span}，覆盖。"
 
 
-def render_weekly_report() -> str:
-    cfg = load_config()
-    report_cfg = cfg["weekly_report"]
+def render_weekly_report(user: User) -> str:
     current_week = to_teach_time(datetime.now()).week
-    future_weeks = int(report_cfg.get("future_weeks", 3))
+    future_weeks = int(user.weekly_future_weeks or 3)
     this_week, future, notes = [], [], []
-    for e in Event.query.all():
+    for e in Event.query.filter_by(user_id=user.id).all():
         if e.note:
             notes.append(f"{e.name}：{e.note}")
         if e.event_type == "range":
@@ -296,7 +309,7 @@ def render_weekly_report() -> str:
             future.append(format_event_brief(e, current_week))
 
     vars_map = {
-        "UserNickname": cfg["user"].get("nickname", "User"),
+        "UserNickname": user.nickname,
         "NowTeachWeek": current_week,
         "MaxTeachWeek": max_teach_week(),
         "ProgressBar": progress_bar(current_week, max_teach_week()),
@@ -305,40 +318,83 @@ def render_weekly_report() -> str:
         "FutureEvents": "\\n".join(f"{i+1}.{x}" for i, x in enumerate(future)) or "无",
         "Notes": "\\n".join(notes) or "（如果没有备注将不会在此处列出）",
     }
-    return report_cfg.get("template", "").format_map(vars_map)
+    return (user.weekly_template or "").format_map(vars_map)
 
 
-def weekly_report_job(schedule_key: str):
+def notify_due_events():
     with app.app_context():
+        now = datetime.now().replace(second=0, microsecond=0)
+        for user in User.query.all():
+            for event in Event.query.filter_by(user_id=user.id).all():
+                if not event_matches_now(event, now):
+                    continue
+                key = f"event-{user.id}-{event.id}-{now.strftime('%Y%m%d%H%M')}"
+                if NotifyLog.query.filter_by(unique_key=key).first():
+                    continue
+                text = event.remind_text or f"事件提醒：{event.name}"
+                send_notification(user, text, event.remind_push, event.remind_email)
+                db.session.add(NotifyLog(user_id=user.id, kind="event", event_id=event.id, unique_key=key))
+                db.session.commit()
+
+
+def weekly_report_job(user_id: int):
+    with app.app_context():
+        user = db.session.get(User, user_id)
+        if not user or not user.weekly_enabled:
+            return
         now = datetime.now()
-        key = f"weekly-{schedule_key}-{now.strftime('%Y%W')}"
+        key = f"weekly-{user.id}-{now.strftime('%Y%W')}"
         if NotifyLog.query.filter_by(unique_key=key).first():
             return
-        report = render_weekly_report()
-        send_notification(report, True, True)
-        db.session.add(NotifyLog(kind="weekly_report", unique_key=key))
+        report = render_weekly_report(user)
+        send_notification(user, report, True, True)
+        db.session.add(NotifyLog(user_id=user.id, kind="weekly_report", unique_key=key))
         db.session.commit()
 
 
 def setup_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(notify_due_events, "interval", minutes=1, id="event_scanner")
-    report_cfg = load_config()["weekly_report"]
-    if report_cfg.get("enabled"):
-        for i, rule in enumerate(report_cfg.get("schedules", [])):
-            weekday = str(rule.get("weekday", "mon")).lower()[:3]
-            hh, mm = parse_hhmm(rule.get("time", "12:00"))
+    with app.app_context():
+        for user in User.query.all():
+            if not user.weekly_enabled:
+                continue
+            weekday = (user.weekly_schedule_weekday or "mon").lower()[:3]
+            hh, mm = parse_hhmm(user.weekly_schedule_time or "12:00")
             trigger = CronTrigger(day_of_week=weekday, hour=hh, minute=mm)
-            scheduler.add_job(lambda k=f"{i}-{weekday}-{hh:02d}{mm:02d}": weekly_report_job(k), trigger, id=f"weekly_{i}")
+            scheduler.add_job(lambda uid=user.id: weekly_report_job(uid), trigger, id=f"weekly_{user.id}", replace_existing=True)
     scheduler.start()
+
+
+@app.route("/setup-admin", methods=["GET", "POST"])
+def setup_admin():
+    if has_admin():
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        nickname = request.form.get("nickname", "").strip()
+        password = request.form.get("password", "")
+        if not username or not nickname or not password:
+            flash("请填写完整管理员信息")
+            return render_template("setup_admin.html")
+        admin = User(username=username, nickname=nickname, password=password, is_admin=True)
+        db.session.add(admin)
+        db.session.commit()
+        flash("管理员创建成功，请登录")
+        return redirect(url_for("login"))
+    return render_template("setup_admin.html")
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if not has_admin():
+        return redirect(url_for("setup_admin"))
     if request.method == "POST":
-        cfg = load_config()["auth"]
-        if request.form.get("username") == cfg.get("username") and request.form.get("password") == cfg.get("password"):
-            session["logged_in"] = True
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        user = User.query.filter_by(username=username, password=password).first()
+        if user:
+            session["user_id"] = user.id
             flash("登录成功")
             return redirect(url_for("index"))
         flash("用户名或密码错误")
@@ -356,7 +412,8 @@ def logout():
 @login_required
 def index():
     cfg = load_config()
-    events = Event.query.order_by(Event.start_week, Event.start_weekday, Event.start_hour).all()
+    user = current_user()
+    events = Event.query.filter_by(user_id=user.id).order_by(Event.start_week, Event.start_weekday, Event.start_hour).all()
     s, _ = term_dates()
     cal = []
     for w in range(1, max_teach_week() + 1):
@@ -365,31 +422,91 @@ def index():
             dt = s + timedelta(days=(w - 1) * 7 + d - 1)
             row.append({"date": dt.day, "month": dt.month})
         cal.append({"week": w, "days": row})
-    return render_template("index.html", cfg=cfg, events=events, cal=cal)
+    users = User.query.order_by(User.id).all() if user.is_admin else []
+    return render_template("index.html", cfg=cfg, user=user, users=users, events=events, cal=cal)
 
 
 @app.post("/config")
 @login_required
 def save_config():
     cfg = load_config()
-    cfg["user"]["username"] = request.form["username"]
-    cfg["user"]["nickname"] = request.form["nickname"]
+    user = current_user()
+
     cfg["teaching_calendar"]["term_name"] = request.form["term_name"]
     cfg["teaching_calendar"]["start_date"] = request.form["start_date"]
     cfg["teaching_calendar"]["end_date"] = request.form["end_date"]
-    cfg["notify"]["pushdeer"]["enabled"] = request.form.get("push_enabled") == "on"
-    cfg["notify"]["pushdeer"]["pushkey"] = request.form.get("pushkey", "")
-    cfg["weekly_report"]["template"] = request.form.get("weekly_template", cfg["weekly_report"]["template"])
     CONFIG_PATH.write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    flash("配置已保存（重启程序后新的周报计划生效）")
+
+    user.nickname = request.form["nickname"]
+    user.push_enabled = request.form.get("push_enabled") == "on"
+    user.pushkey = request.form.get("pushkey", "")
+    user.email_enabled = request.form.get("email_enabled") == "on"
+    user.tenant_id = request.form.get("tenant_id", "common")
+    user.client_id = request.form.get("client_id", "")
+    user.client_secret = request.form.get("client_secret", "")
+    user.sender_email = request.form.get("sender_email", "")
+    user.weekly_template = request.form.get("weekly_template", user.weekly_template)
+    user.weekly_future_weeks = int(request.form.get("future_weeks", user.weekly_future_weeks) or 3)
+    user.weekly_schedule_weekday = request.form.get("weekly_weekday", user.weekly_schedule_weekday or "mon")
+    user.weekly_schedule_time = request.form.get("weekly_time", user.weekly_schedule_time or "12:00")
+    user.weekly_enabled = request.form.get("weekly_enabled") == "on"
+
+    db.session.commit()
+    flash("配置已保存（周报调度重启后生效）")
+    return redirect(url_for("index"))
+
+
+@app.post("/admin/users")
+@login_required
+@admin_required
+def create_user():
+    username = request.form.get("username", "").strip()
+    nickname = request.form.get("nickname", "").strip()
+    password = request.form.get("password", "")
+    is_admin = request.form.get("is_admin") == "on"
+    if not username or not nickname or not password:
+        flash("用户名/称呼/密码不能为空")
+        return redirect(url_for("index"))
+    if User.query.filter_by(username=username).first():
+        flash("用户名已存在")
+        return redirect(url_for("index"))
+    db.session.add(User(username=username, nickname=nickname, password=password, is_admin=is_admin))
+    db.session.commit()
+    flash("用户创建成功")
+    return redirect(url_for("index"))
+
+
+@app.post("/admin/users/<int:user_id>/delete")
+@login_required
+@admin_required
+def delete_user(user_id):
+    me = current_user()
+    target = db.session.get(User, user_id)
+    if not target:
+        flash("用户不存在")
+        return redirect(url_for("index"))
+    if target.id == me.id:
+        flash("不能删除当前登录管理员")
+        return redirect(url_for("index"))
+    if target.is_admin and User.query.filter_by(is_admin=True).count() <= 1:
+        flash("至少保留一个管理员")
+        return redirect(url_for("index"))
+
+    Event.query.filter_by(user_id=target.id).delete()
+    NotifyLog.query.filter_by(user_id=target.id).delete()
+    db.session.delete(target)
+    db.session.commit()
+    flash("用户删除成功")
     return redirect(url_for("index"))
 
 
 @app.post("/events")
 @login_required
 def create_event():
+    user = current_user()
     event_type = request.form["event_type"]
     e = Event(
+        user_id=user.id,
         name=request.form["name"],
         event_type=event_type,
         start_week=int(request.form["start_week"]),
@@ -421,7 +538,12 @@ def create_event():
 @app.post("/events/<int:event_id>/delete")
 @login_required
 def delete_event(event_id):
-    db.session.delete(Event.query.get_or_404(event_id))
+    user = current_user()
+    target = Event.query.filter_by(id=event_id, user_id=user.id).first()
+    if not target:
+        flash("事件不存在或无权限")
+        return redirect(url_for("index"))
+    db.session.delete(target)
     db.session.commit()
     flash("事件已删除")
     return redirect(url_for("index"))
@@ -430,10 +552,11 @@ def delete_event(event_id):
 @app.post("/test-notify")
 @login_required
 def test_notify():
+    user = current_user()
     content = request.form.get("content", "这是一条测试通知。")
     use_push = request.form.get("use_push") == "on"
     use_email = request.form.get("use_email") == "on"
-    send_notification(content, use_push, use_email)
+    send_notification(user, content, use_push, use_email)
     flash("测试通知已触发，请检查对应渠道。")
     return redirect(url_for("index"))
 
