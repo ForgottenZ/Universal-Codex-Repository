@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
 from functools import wraps
@@ -17,6 +18,7 @@ from flask_sqlalchemy import SQLAlchemy
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
+LOG_DIR = BASE_DIR / "logs"
 
 DEFAULT_CONFIG = {
     "app": {"secret_key": "replace-this-secret"},
@@ -227,47 +229,120 @@ def progress_bar(current: int, maximum: int) -> str:
     return "[" + "■" * full + "□" * (10 - full) + "]"
 
 
+def log(message: str, level: str = "INFO"):
+    now = datetime.now()
+    line = f"[{now.isoformat(timespec='seconds')}] [{level}] {message}"
+    print(line, flush=True)
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        logfile = LOG_DIR / f"app-{now.strftime('%Y%m%d')}.log"
+        with logfile.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
 def send_pushdeer(user: User, text: str):
-    if user.push_enabled and user.pushkey:
-        requests.get(
+    if not (user.push_enabled and user.pushkey):
+        return
+    try:
+        r = requests.get(
             "https://api2.pushdeer.com/message/push",
             params={"pushkey": user.pushkey, "text": "教学周提醒", "desp": text},
             timeout=10,
         )
+        if r.status_code != 200:
+            log(f"Pushdeer发送失败 user={user.username} status={r.status_code} body={(r.text or '')[:300]}", "WARN")
+        else:
+            log(f"Pushdeer发送成功 user={user.username}")
+    except Exception as exc:
+        log(f"Pushdeer异常 user={user.username} error={exc}", "ERROR")
 
 
-def graph_token(user: User) -> str | None:
-    app_client = msal.ConfidentialClientApplication(
-        client_id=user.client_id,
-        client_credential=user.client_secret,
-        authority=f"https://login.microsoftonline.com/{user.tenant_id or 'common'}",
-    )
-    token = app_client.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-    return token.get("access_token")
+def _acquire_graph_token(user: User) -> tuple[str | None, bool]:
+    authority = f"https://login.microsoftonline.com/{user.tenant_id or 'common'}"
+    scopes = ["https://graph.microsoft.com/.default"]
+
+    # 优先应用凭据模式（与现有配置兼容）
+    if user.client_secret:
+        app_client = msal.ConfidentialClientApplication(
+            client_id=user.client_id,
+            client_credential=user.client_secret,
+            authority=authority,
+        )
+        token = app_client.acquire_token_for_client(scopes=scopes)
+        if "access_token" in token:
+            return token.get("access_token"), False
+        log(f"Graph应用凭据取token失败 user={user.username} detail={token.get('error_description') or token}", "WARN")
+
+    # 回退设备码模式（参考 notify01.py 思路）
+    cache_file = BASE_DIR / f"msal_cache_user_{user.id}.bin"
+    cache = msal.SerializableTokenCache()
+    if cache_file.exists():
+        try:
+            cache.deserialize(cache_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log(f"MSAL缓存读取失败 user={user.username} error={exc}", "WARN")
+
+    pca = msal.PublicClientApplication(client_id=user.client_id, authority=authority, token_cache=cache)
+    accounts = pca.get_accounts()
+    token = pca.acquire_token_silent(scopes, account=accounts[0] if accounts else None)
+    if not token:
+        flow = pca.initiate_device_flow(scopes=scopes)
+        if "user_code" not in flow:
+            log(f"设备码流程初始化失败 user={user.username} detail={flow}", "ERROR")
+            return None, True
+        log(f"请为用户 {user.username} 完成Graph设备码登录：{flow.get('message')}", "WARN")
+        token = pca.acquire_token_by_device_flow(flow)
+
+    if cache.has_state_changed:
+        try:
+            cache_file.write_text(cache.serialize(), encoding="utf-8")
+        except Exception as exc:
+            log(f"MSAL缓存写入失败 user={user.username} error={exc}", "WARN")
+
+    if "access_token" in token:
+        return token.get("access_token"), True
+    log(f"Graph设备码取token失败 user={user.username} detail={token.get('error_description') or token}", "ERROR")
+    return None, True
 
 
 def send_graph_email(user: User, text: str):
-    if not user.email_enabled or not user.sender_email or not user.client_id or not user.client_secret:
+    if not user.email_enabled or not user.sender_email or not user.client_id:
+        log(f"Graph邮件跳过 user={user.username}（未启用或配置不完整）", "WARN")
         return
-    token = graph_token(user)
+
+    token, is_delegated = _acquire_graph_token(user)
     if not token:
         return
+
     payload = {
         "message": {
             "subject": "教学周提醒",
             "body": {"contentType": "Text", "content": text},
             "toRecipients": [{"emailAddress": {"address": user.sender_email}}],
-        }
+        },
+        "saveToSentItems": True,
     }
-    requests.post(
-        f"https://graph.microsoft.com/v1.0/users/{user.sender_email}/sendMail",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        data=json.dumps(payload),
-        timeout=15,
-    )
+
+    url = "https://graph.microsoft.com/v1.0/me/sendMail" if is_delegated else f"https://graph.microsoft.com/v1.0/users/{user.sender_email}/sendMail"
+    try:
+        r = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            data=json.dumps(payload),
+            timeout=20,
+        )
+        if r.status_code not in (200, 202):
+            log(f"Graph邮件发送失败 user={user.username} status={r.status_code} body={(r.text or '')[:500]}", "ERROR")
+        else:
+            log(f"Graph邮件发送成功 user={user.username} mode={'delegated' if is_delegated else 'app'}")
+    except Exception as exc:
+        log(f"Graph邮件异常 user={user.username} error={exc}", "ERROR")
 
 
 def send_notification(user: User, content: str, use_push: bool, use_email: bool):
+    log(f"触发通知 user={user.username} push={use_push} email={use_email}")
     if use_push:
         send_pushdeer(user, content)
     if use_email:
@@ -324,6 +399,7 @@ def render_weekly_report(user: User) -> str:
 def notify_due_events():
     with app.app_context():
         now = datetime.now().replace(second=0, microsecond=0)
+        log(f"开始扫描事件 now={now}")
         for user in User.query.all():
             for event in Event.query.filter_by(user_id=user.id).all():
                 if not event_matches_now(event, now):
@@ -335,6 +411,7 @@ def notify_due_events():
                 send_notification(user, text, event.remind_push, event.remind_email)
                 db.session.add(NotifyLog(user_id=user.id, kind="event", event_id=event.id, unique_key=key))
                 db.session.commit()
+                log(f"事件提醒已发送 user={user.username} event={event.name}")
 
 
 def weekly_report_job(user_id: int):
@@ -347,6 +424,7 @@ def weekly_report_job(user_id: int):
         if NotifyLog.query.filter_by(unique_key=key).first():
             return
         report = render_weekly_report(user)
+        log(f"发送每周报告 user={user.username}")
         send_notification(user, report, True, True)
         db.session.add(NotifyLog(user_id=user.id, kind="weekly_report", unique_key=key))
         db.session.commit()
@@ -364,6 +442,7 @@ def setup_scheduler():
             trigger = CronTrigger(day_of_week=weekday, hour=hh, minute=mm)
             scheduler.add_job(lambda uid=user.id: weekly_report_job(uid), trigger, id=f"weekly_{user.id}", replace_existing=True)
     scheduler.start()
+    log("调度器已启动")
 
 
 @app.route("/setup-admin", methods=["GET", "POST"])
