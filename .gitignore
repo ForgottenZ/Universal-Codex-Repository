@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+config.yaml
+teaching_calendar.db
+msal_cache.bin
