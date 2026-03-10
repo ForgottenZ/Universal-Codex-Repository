@@ -49,6 +49,7 @@ email:
 - `client_secret` 存在时优先走应用凭据；失败后回退设备码。
 - `client_secret` 为空时直接走设备码（首次会在日志里打印登录提示）。
 - `scopes` 可写 `Mail.Send` / `User.Read`，程序会自动补全为 Graph scope URL。
+- MSAL 保留 scope（如 `offline_access` / `openid` / `profile`）会自动过滤，避免设备码流程报错。
 
 ## 说明
 

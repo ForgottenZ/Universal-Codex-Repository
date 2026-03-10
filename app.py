@@ -268,15 +268,28 @@ def send_pushdeer(user: User, text: str):
 def _normalize_scopes(scopes):
     vals = scopes or []
     out = []
+    # MSAL 保留 scope，不能传入 initiate_device_flow
+    reserved = {"openid", "profile", "offline_access"}
     for sc in vals:
         t = str(sc).strip()
         if not t:
+            continue
+        low = t.lower()
+        tail = low.split("/")[-1]
+        if low in reserved or tail in reserved:
+            log(f"忽略保留scope: {t}", "WARN")
             continue
         if "://" in t:
             out.append(t)
         else:
             out.append(f"https://graph.microsoft.com/{t}")
-    return out
+
+    # 去重
+    uniq = []
+    for sc in out:
+        if sc not in uniq:
+            uniq.append(sc)
+    return uniq
 
 
 def _resolve_email_profile(user: User) -> dict:
@@ -298,7 +311,7 @@ def _resolve_email_profile(user: User) -> dict:
     elif client_secret:
         scopes = ["https://graph.microsoft.com/.default"]
     else:
-        scopes = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read", "offline_access"]
+        scopes = ["https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/User.Read"]
 
     return {
         "enable": enable,
@@ -343,6 +356,11 @@ def _acquire_graph_token(user: User, profile: dict) -> tuple[str | None, bool]:
             cache.deserialize(cache_file.read_text(encoding="utf-8"))
         except Exception as exc:
             log(f"MSAL缓存读取失败 user={user.username} error={exc}", "WARN")
+
+    scopes = _normalize_scopes(scopes)
+    if not scopes:
+        log(f"Graph配置缺失有效scopes user={user.username}", "ERROR")
+        return None, True
 
     pca = msal.PublicClientApplication(client_id=client_id, authority=authority, token_cache=cache)
     account = None
