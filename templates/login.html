@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>登录 - 教学周日历系统</title>
+  <style>
+    body { font-family: Arial, sans-serif; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; background:#f5f7fb; }
+    .box { width:360px; background:white; border:1px solid #ddd; border-radius:10px; padding:20px; }
+    input, button { width:100%; margin:6px 0; padding:10px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>登录系统</h2>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>{% endif %}
+    {% endwith %}
+    <form method="post" action="/login">
+      <label>账号</label>
+      <input name="username" required />
+      <label>密码</label>
+      <input type="password" name="password" required />
+      <button type="submit">登录</button>
+    </form>
+  </div>
+</body>
+</html>

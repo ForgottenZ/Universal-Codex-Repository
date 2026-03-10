@@ -10,11 +10,15 @@
     th,td { border:1px solid #ccd7e0; text-align:center; padding:8px; }
     .weekend { color:#f97316; }
     .card { border:1px solid #ddd; border-radius:8px; padding:12px; }
-    input, select, textarea { width:100%; margin:4px 0; }
+    input, select, textarea, button { width:100%; margin:4px 0; }
+    .hidden { display:none; }
   </style>
 </head>
 <body>
-  <h1>{{ cfg.teaching_calendar.term_name }}</h1>
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <h1>{{ cfg.teaching_calendar.term_name }}</h1>
+    <form method="post" action="/logout" style="width:180px;"><button type="submit">退出登录</button></form>
+  </div>
   {% with messages = get_flashed_messages() %}
     {% if messages %}
       <ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>
@@ -57,10 +61,10 @@
   <div class="grid" style="margin-top:20px;">
     <div class="card">
       <h2>新增事件</h2>
-      <form method="post" action="/events">
+      <form method="post" action="/events" id="event-form">
         <label>名称</label><input name="name" required />
         <label>类型</label>
-        <select name="event_type">
+        <select name="event_type" id="event_type">
           <option value="one_time">单次</option>
           <option value="recurring">循环</option>
           <option value="range">覆盖区间</option>
@@ -70,15 +74,19 @@
         <label>开始时</label><input type="number" name="start_hour" value="8" min="0" max="23" />
         <label>开始分</label><input type="number" name="start_minute" value="0" min="0" max="59" />
 
-        <label>结束：第X教学周(覆盖事件用)</label><input type="number" name="end_week" />
-        <label>结束：周X(1-7)</label><input type="number" name="end_weekday" />
-        <label>结束时</label><input type="number" name="end_hour" />
-        <label>结束分</label><input type="number" name="end_minute" />
+        <div id="range-fields" class="hidden">
+          <label>结束：第X教学周(覆盖事件用)</label><input type="number" name="end_week" />
+          <label>结束：周X(1-7)</label><input type="number" name="end_weekday" />
+          <label>结束时</label><input type="number" name="end_hour" />
+          <label>结束分</label><input type="number" name="end_minute" />
+        </div>
 
-        <label>循环间隔：X教学周</label><input type="number" name="repeat_weeks" />
-        <label>循环间隔：X天</label><input type="number" name="repeat_days" />
-        <label>循环间隔：X小时</label><input type="number" name="repeat_hours" />
-        <label>循环间隔：X分钟</label><input type="number" name="repeat_minutes" />
+        <div id="recurring-fields" class="hidden">
+          <label>循环间隔：X教学周</label><input type="number" name="repeat_weeks" />
+          <label>循环间隔：X天</label><input type="number" name="repeat_days" />
+          <label>循环间隔：X小时</label><input type="number" name="repeat_hours" />
+          <label>循环间隔：X分钟</label><input type="number" name="repeat_minutes" />
+        </div>
 
         <label><input type="checkbox" name="remind_push" /> Pushdeer提醒</label>
         <label><input type="checkbox" name="remind_email" /> 邮件提醒</label>
@@ -89,12 +97,21 @@
     </div>
 
     <div class="card">
+      <h2>测试通知</h2>
+      <form method="post" action="/test-notify">
+        <label><input type="checkbox" name="use_push" checked /> Pushdeer</label>
+        <label><input type="checkbox" name="use_email" checked /> Email</label>
+        <label>测试内容</label>
+        <textarea name="content" rows="4">这是一条测试通知。</textarea>
+        <button type="submit">发送测试通知</button>
+      </form>
+
       <h2>事件列表</h2>
       <ul>
       {% for e in events %}
         <li>
           [{{ e.event_type }}] {{ e.name }} - 第{{ e.start_week }}教学周 周{{ e.start_weekday }} {{ '%02d'|format(e.start_hour) }}:{{ '%02d'|format(e.start_minute) }}
-          <form method="post" action="/events/{{e.id}}/delete" style="display:inline;"><button type="submit">删除</button></form>
+          <form method="post" action="/events/{{e.id}}/delete" style="display:inline;"><button type="submit" style="width:auto;">删除</button></form>
         </li>
       {% else %}
         <li>暂无事件</li>
@@ -102,5 +119,18 @@
       </ul>
     </div>
   </div>
+
+<script>
+  const typeEl = document.getElementById('event_type');
+  const recurring = document.getElementById('recurring-fields');
+  const range = document.getElementById('range-fields');
+  function updateFields() {
+    const t = typeEl.value;
+    recurring.classList.toggle('hidden', t !== 'recurring');
+    range.classList.toggle('hidden', t !== 'range');
+  }
+  typeEl.addEventListener('change', updateFields);
+  updateFields();
+</script>
 </body>
 </html>

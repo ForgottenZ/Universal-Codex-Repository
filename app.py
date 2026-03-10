@@ -2,25 +2,25 @@
 # -*- coding: utf-8 -*-
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
+from functools import wraps
 from pathlib import Path
-from typing import Any
 
+import msal
 import requests
 import yaml
-from flask import Flask, redirect, render_template, request, url_for, flash
-from flask_sqlalchemy import SQLAlchemy
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-import msal
+from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask_sqlalchemy import SQLAlchemy
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
 
 DEFAULT_CONFIG = {
     "app": {"secret_key": "replace-this-secret"},
+    "auth": {"username": "admin", "password": "admin123"},
     "user": {"username": "hax", "nickname": "Hax"},
     "teaching_calendar": {
         "term_name": "2025-2026学年(春)",
@@ -51,11 +51,8 @@ DEFAULT_CONFIG = {
     "weekly_report": {
         "enabled": True,
         "future_weeks": 3,
-        "schedules": [
-            {"weekday": "mon", "time": "12:00"}
-        ],
+        "schedules": [{"weekday": "mon", "time": "12:00"}],
         "template": "Hi, {UserNickname}!\\n现在是第{NowTeachWeek}教学周！{ProgressBar} {NowTeachWeek}/{MaxTeachWeek}\\n您本周的事件有：\\n{CurrentWeekEvents}\\n您未来{FutureWeeks}周的事件有：\\n{FutureEvents}\\n详细说明：\\n{Notes}",
-        "email_to": "",
     },
 }
 
@@ -71,10 +68,8 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-
 app = Flask(__name__)
 app.config["SECRET_KEY"] = CONFIG["app"]["secret_key"]
-
 
 mysql = CONFIG["database"]["mysql"]
 if mysql.get("enabled"):
@@ -95,7 +90,7 @@ class Event(db.Model):
     note = db.Column(db.Text, default="")
 
     start_week = db.Column(db.Integer, nullable=False)
-    start_weekday = db.Column(db.Integer, nullable=False)  # 1-7
+    start_weekday = db.Column(db.Integer, nullable=False)
     start_hour = db.Column(db.Integer, nullable=False, default=0)
     start_minute = db.Column(db.Integer, nullable=False, default=0)
 
@@ -116,7 +111,7 @@ class Event(db.Model):
 
 class NotifyLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    kind = db.Column(db.String(32), nullable=False)  # event/weekly_report
+    kind = db.Column(db.String(32), nullable=False)
     event_id = db.Column(db.Integer, nullable=True)
     unique_key = db.Column(db.String(128), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -128,6 +123,16 @@ class TeachTime:
     weekday: int
     hour: int
     minute: int
+
+
+def login_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login"))
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 def term_dates():
@@ -144,8 +149,7 @@ def max_teach_week():
 
 def to_teach_time(dt: datetime) -> TeachTime:
     s, _ = term_dates()
-    d = dt.date()
-    delta = (d - s).days
+    delta = (dt.date() - s).days
     return TeachTime(week=delta // 7 + 1, weekday=dt.weekday() + 1, hour=dt.hour, minute=dt.minute)
 
 
@@ -175,20 +179,14 @@ def event_matches_now(event: Event, now: datetime) -> bool:
         if now < start_dt:
             return False
         diff = int((now - start_dt).total_seconds() // 60)
-        interval = (event.repeat_weeks or 0) * 7 * 24 * 60 + (event.repeat_days or 0) * 24 * 60 + (event.repeat_hours or 0) * 60 + (event.repeat_minutes or 0)
-        if interval <= 0:
-            return False
-        return diff % interval == 0
-
+        interval = (
+            (event.repeat_weeks or 0) * 7 * 24 * 60
+            + (event.repeat_days or 0) * 24 * 60
+            + (event.repeat_hours or 0) * 60
+            + (event.repeat_minutes or 0)
+        )
+        return interval > 0 and diff % interval == 0
     return False
-
-
-def event_is_happening(event: Event, now: datetime) -> bool:
-    if event.event_type != "range":
-        return False
-    start_dt = teach_time_to_dt(TeachTime(event.start_week, event.start_weekday, event.start_hour, event.start_minute))
-    end_dt = teach_time_to_dt(TeachTime(event.end_week, event.end_weekday, event.end_hour, event.end_minute))
-    return start_dt <= now <= end_dt
 
 
 def progress_bar(current: int, maximum: int) -> str:
@@ -199,11 +197,12 @@ def progress_bar(current: int, maximum: int) -> str:
 
 def send_pushdeer(text: str):
     cfg = load_config()["notify"]["pushdeer"]
-    if not cfg.get("enabled"):
-        return
-    if not cfg.get("pushkey"):
-        return
-    requests.get("https://api2.pushdeer.com/message/push", params={"pushkey": cfg["pushkey"], "text": "教学周提醒", "desp": text}, timeout=10)
+    if cfg.get("enabled") and cfg.get("pushkey"):
+        requests.get(
+            "https://api2.pushdeer.com/message/push",
+            params={"pushkey": cfg["pushkey"], "text": "教学周提醒", "desp": text},
+            timeout=10,
+        )
 
 
 def graph_token(cfg: dict) -> str | None:
@@ -218,7 +217,7 @@ def graph_token(cfg: dict) -> str | None:
 
 def send_graph_email(text: str):
     cfg = load_config()["notify"]["microsoft_graph"]
-    if not cfg.get("enabled"):
+    if not cfg.get("enabled") or not cfg.get("sender_email"):
         return
     token = graph_token(cfg)
     if not token:
@@ -246,10 +245,11 @@ def send_notification(content: str, use_push: bool, use_email: bool):
 
 
 def notify_due_events():
-    now = datetime.now().replace(second=0, microsecond=0)
-    for event in Event.query.all():
-        matched = event_matches_now(event, now)
-        if matched:
+    with app.app_context():
+        now = datetime.now().replace(second=0, microsecond=0)
+        for event in Event.query.all():
+            if not event_matches_now(event, now):
+                continue
             key = f"event-{event.id}-{now.strftime('%Y%m%d%H%M')}"
             if NotifyLog.query.filter_by(unique_key=key).first():
                 continue
@@ -270,22 +270,18 @@ def format_event_brief(event: Event, now_week: int) -> str:
         return f"{event.name}：第{event.start_week}教学周，周{event.start_weekday}{event.start_hour:02d}:{event.start_minute:02d}，{remind_text}，单次。"
     if event.event_type == "recurring":
         return f"{event.name}：周{event.start_weekday}{event.start_hour:02d}:{event.start_minute:02d}起，{remind_text}，循环。"
-    return f"{event.name}：第{event.start_week}教学周-第{event.end_week}教学周{progress_bar(now_week - event.start_week + 1, event.end_week - event.start_week + 1)} {max(now_week - event.start_week + 1, 0)}/{event.end_week - event.start_week + 1}，覆盖。"
+    span = max((event.end_week or event.start_week) - event.start_week + 1, 1)
+    done = max(now_week - event.start_week + 1, 0)
+    return f"{event.name}：第{event.start_week}教学周-第{event.end_week}教学周{progress_bar(done, span)} {done}/{span}，覆盖。"
 
 
 def render_weekly_report() -> str:
     cfg = load_config()
-    user = cfg["user"]
     report_cfg = cfg["weekly_report"]
-    now = datetime.now()
-    now_tt = to_teach_time(now)
-    current_week = now_tt.week
+    current_week = to_teach_time(datetime.now()).week
     future_weeks = int(report_cfg.get("future_weeks", 3))
-    events = Event.query.all()
-    this_week = []
-    future = []
-    notes = []
-    for e in events:
+    this_week, future, notes = [], [], []
+    for e in Event.query.all():
         if e.note:
             notes.append(f"{e.name}：{e.note}")
         if e.event_type == "range":
@@ -294,16 +290,13 @@ def render_weekly_report() -> str:
             elif current_week < e.start_week <= current_week + future_weeks:
                 future.append(format_event_brief(e, current_week))
             continue
-        if e.start_week == current_week:
+        if e.start_week == current_week or e.event_type == "recurring":
             this_week.append(format_event_brief(e, current_week))
-        elif current_week < e.start_week <= current_week + future_weeks:
-            future.append(format_event_brief(e, current_week))
-        elif e.event_type == "recurring":
-            this_week.append(format_event_brief(e, current_week))
+        if (current_week < e.start_week <= current_week + future_weeks) or e.event_type == "recurring":
             future.append(format_event_brief(e, current_week))
 
     vars_map = {
-        "UserNickname": user.get("nickname", "User"),
+        "UserNickname": cfg["user"].get("nickname", "User"),
         "NowTeachWeek": current_week,
         "MaxTeachWeek": max_teach_week(),
         "ProgressBar": progress_bar(current_week, max_teach_week()),
@@ -312,19 +305,19 @@ def render_weekly_report() -> str:
         "FutureEvents": "\\n".join(f"{i+1}.{x}" for i, x in enumerate(future)) or "无",
         "Notes": "\\n".join(notes) or "（如果没有备注将不会在此处列出）",
     }
-    tpl = report_cfg.get("template", "")
-    return tpl.format_map(vars_map)
+    return report_cfg.get("template", "").format_map(vars_map)
 
 
 def weekly_report_job(schedule_key: str):
-    now = datetime.now()
-    key = f"weekly-{schedule_key}-{now.strftime('%Y%W')}"
-    if NotifyLog.query.filter_by(unique_key=key).first():
-        return
-    report = render_weekly_report()
-    send_notification(report, True, True)
-    db.session.add(NotifyLog(kind="weekly_report", unique_key=key))
-    db.session.commit()
+    with app.app_context():
+        now = datetime.now()
+        key = f"weekly-{schedule_key}-{now.strftime('%Y%W')}"
+        if NotifyLog.query.filter_by(unique_key=key).first():
+            return
+        report = render_weekly_report()
+        send_notification(report, True, True)
+        db.session.add(NotifyLog(kind="weekly_report", unique_key=key))
+        db.session.commit()
 
 
 def setup_scheduler():
@@ -340,7 +333,27 @@ def setup_scheduler():
     scheduler.start()
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        cfg = load_config()["auth"]
+        if request.form.get("username") == cfg.get("username") and request.form.get("password") == cfg.get("password"):
+            session["logged_in"] = True
+            flash("登录成功")
+            return redirect(url_for("index"))
+        flash("用户名或密码错误")
+    return render_template("login.html")
+
+
+@app.post("/logout")
+def logout():
+    session.clear()
+    flash("已退出登录")
+    return redirect(url_for("login"))
+
+
 @app.route("/")
+@login_required
 def index():
     cfg = load_config()
     events = Event.query.order_by(Event.start_week, Event.start_weekday, Event.start_hour).all()
@@ -356,6 +369,7 @@ def index():
 
 
 @app.post("/config")
+@login_required
 def save_config():
     cfg = load_config()
     cfg["user"]["username"] = request.form["username"]
@@ -372,10 +386,12 @@ def save_config():
 
 
 @app.post("/events")
+@login_required
 def create_event():
+    event_type = request.form["event_type"]
     e = Event(
         name=request.form["name"],
-        event_type=request.form["event_type"],
+        event_type=event_type,
         start_week=int(request.form["start_week"]),
         start_weekday=int(request.form["start_weekday"]),
         start_hour=int(request.form["start_hour"]),
@@ -393,6 +409,9 @@ def create_event():
         remind_text=request.form.get("remind_text", ""),
         note=request.form.get("note", ""),
     )
+    if event_type == "recurring" and not any([e.repeat_weeks, e.repeat_days, e.repeat_hours, e.repeat_minutes]):
+        flash("循环事件必须设置至少一个循环间隔")
+        return redirect(url_for("index"))
     db.session.add(e)
     db.session.commit()
     flash("事件已创建")
@@ -400,11 +419,22 @@ def create_event():
 
 
 @app.post("/events/<int:event_id>/delete")
+@login_required
 def delete_event(event_id):
-    e = Event.query.get_or_404(event_id)
-    db.session.delete(e)
+    db.session.delete(Event.query.get_or_404(event_id))
     db.session.commit()
     flash("事件已删除")
+    return redirect(url_for("index"))
+
+
+@app.post("/test-notify")
+@login_required
+def test_notify():
+    content = request.form.get("content", "这是一条测试通知。")
+    use_push = request.form.get("use_push") == "on"
+    use_email = request.form.get("use_email") == "on"
+    send_notification(content, use_push, use_email)
+    flash("测试通知已触发，请检查对应渠道。")
     return redirect(url_for("index"))
 
 
