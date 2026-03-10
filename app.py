@@ -146,7 +146,13 @@ def current_user() -> User | None:
 def login_required(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if not session.get("user_id"):
+        uid = session.get("user_id")
+        if not uid:
+            return redirect(url_for("login"))
+        # 修复会话残留导致 user=None 的崩溃：比如用户被管理员删除后，旧 session 仍存在
+        if db.session.get(User, uid) is None:
+            session.clear()
+            flash("登录状态已失效，请重新登录")
             return redirect(url_for("login"))
         return func(*args, **kwargs)
 
@@ -492,6 +498,10 @@ def logout():
 def index():
     cfg = load_config()
     user = current_user()
+    if user is None:
+        session.clear()
+        flash("登录状态已失效，请重新登录")
+        return redirect(url_for("login"))
     events = Event.query.filter_by(user_id=user.id).order_by(Event.start_week, Event.start_weekday, Event.start_hour).all()
     s, _ = term_dates()
     cal = []
