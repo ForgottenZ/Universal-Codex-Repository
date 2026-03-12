@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">等待审核</h1>
+  <p class="muted">房间 <strong>{{ room.room_name }}</strong> 已开启审查制度，你的进入请求已发送给房间内所有在线用户。</p>
+
+  <div class="row" style="margin-top:10px; flex-wrap: wrap;">
+    <div class="pill">请求ID：<code id="reqId">{{ request_id }}</code></div>
+    <div class="pill">房间代码：<code>{{ room.room_key }}</code></div>
+  </div>
+
+  <div id="statusBox" class="flash-item" style="margin-top:14px;">
+    状态：<strong>等待中</strong>（请稍候…）
+  </div>
+
+  <div class="row" style="margin-top:12px; flex-wrap: wrap;">
+    <a class="btn-mini" href="{{ share_url }}">手动重试进入</a>
+    <a class="btn-mini" href="{{ url_for('rooms', key=room.room_key) }}">使用默认入口重试</a>
+  </div>
+
+  <p class="muted small" style="margin-top:10px;">提示：管理员不受审查影响，管理员进入房间后可以开启/关闭审查。</p>
+</div>
+
+<script>
+  const REQ_ID = Number(document.getElementById('reqId').textContent);
+  const STATUS = document.getElementById('statusBox');
+  const SHARE_URL = {{ (share_url or '')|tojson }};
+
+  function setStatus(html) {
+    STATUS.innerHTML = html;
+  }
+
+  async function pollOnce() {
+    try {
+      const res = await fetch(`/api/join_requests/${REQ_ID}/status`, { credentials: 'include' });
+      const data = await res.json();
+      if (!data.ok) return;
+      if (data.status === 'approved') {
+        setStatus('状态：<strong>已通过</strong>，即将进入房间…');
+        setTimeout(() => { window.location.href = SHARE_URL || `/rooms?key={{ room.room_key }}`; }, 800);
+      } else if (data.status === 'rejected') {
+        setStatus('状态：<strong>已拒绝</strong>。你可以稍后再次尝试进入（会重新发起请求）。');
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  // SSE (优先)
+  try {
+    const es = new EventSource(`/api/join_requests/${REQ_ID}/events`, { withCredentials: true });
+
+    es.addEventListener('hello', () => {
+      // no-op
+    });
+
+    es.addEventListener('decided', (e) => {
+      try {
+        const payload = JSON.parse(e.data || '{}');
+        if (payload.status === 'approved') {
+          setStatus('状态：<strong>已通过</strong>，即将进入房间…');
+          setTimeout(() => { window.location.href = SHARE_URL || `/rooms?key={{ room.room_key }}`; }, 800);
+        } else if (payload.status === 'rejected') {
+          setStatus('状态：<strong>已拒绝</strong>。你可以稍后再次尝试进入（会重新发起请求）。');
+        }
+      } catch {}
+    });
+
+    es.onerror = () => {
+      // fallback polling
+      setTimeout(pollOnce, 800);
+    };
+  } catch {
+    // fallback polling
+    setInterval(pollOnce, 1500);
+  }
+
+  // also do an initial poll
+  pollOnce();
+</script>
+{% endblock %}

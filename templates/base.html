@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ page_title or settings.site_title }}</title>
+
+  {% if settings.icon_url %}
+    <link rel="icon" href="{{ settings.icon_url }}" />
+  {% elif settings.icon_path %}
+    <link rel="icon" href="{{ url_for('uploaded_file', filename=settings.icon_path) }}" />
+  {% endif %}
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-row">
+      <div class="brand">
+        <div class="brand-title">{{ settings.site_title }}</div>
+        <div class="brand-subtitle">{{ settings.site_subtitle }}</div>
+      </div>
+
+      <div class="header-actions">
+        {% if is_admin %}
+          <a class="btn-link" href="{{ url_for('admin_dashboard') }}">管理员面板</a>
+          <a class="btn-link" href="{{ url_for('admin_settings') }}">站点设置</a>
+          <a class="btn-link" href="{{ url_for('admin_logout') }}">退出</a>
+        {% else %}
+          <a class="btn-link" href="{{ url_for('admin_login') }}">管理员登录</a>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="flash-list">
+          {% for msg in messages %}
+            <div class="flash-item">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="container small muted">
+      {{ settings.footer_text }}
+    </div>
+  </footer>
+</body>
+</html>

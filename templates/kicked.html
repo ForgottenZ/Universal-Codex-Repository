@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">你已被踢出房间</h1>
+  <p class="muted">管理员已将你从房间中移除。</p>
+  {% if room_key %}
+    <p class="muted small">房间代码：<code>{{ room_key }}</code></p>
+  {% endif %}
+
+  <div class="row" style="margin-top:12px; flex-wrap:wrap;">
+    {% if share_url %}
+      <a class="btn-mini" href="{{ share_url }}">尝试重新进入</a>
+    {% endif %}
+    <a class="btn-mini" href="{{ url_for('rooms', key=room_key) }}">默认入口</a>
+    <a class="btn-mini" href="{{ url_for('index') }}">返回首页</a>
+  </div>
+
+  <p class="muted small" style="margin-top:10px;">如果你同时被封禁（房间封禁或全局封禁），重新进入将会被拒绝。</p>
+</div>
+{% endblock %}

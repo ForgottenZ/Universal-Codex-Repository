@@ -1,9 +1,58 @@
-# Universal-Codex-Repository
-This is a universal codex repository for my codex. All branches are projects. Do not edit The MAIN Branch.
-You is codex. The wisely coding AI agent. You now is in the writable branch. Do anything i ask you to do and do anything you want. Making the inspiration grow.
-可根据想象力自主添加你认为其有利于用户使用的新功能，但需说明。
-请对代码进行可能的测试。
-如果其预计不是一个python程序，请在Readme.md中详细解释如何build该程序。
-如果其预计是一个python程序，请给出requirements.txt。
-请使用中文来制作摘要（Use CHINESE To Create The Summary)。
-在摘要结尾输出你的模型名称。
+# 大转盘房间系统（SQLite + SSE 实时同步）
+
+## 功能概览
+
+- **管理员创建房间**：生成分享链接（可自定义路径和参数名）
+- **房间独立**：项目、转动记录、状态互不影响
+- **任意拿到房间代码的人都可添加项目**：文字 + 可选图片，可设置权重/概率
+- **项目颜色可自定义**：未填写颜色时自动随机分配颜色（并对旧数据做了迁移：无颜色的项目会被分配一个稳定的默认色）
+- **转动转盘会产生记录**：所有人可见，支持动画效果
+- **实时同步**：项目 / 记录 / 转盘状态 / 在线用户 / 入房审核请求通过 **SSE** 实时推送
+- **白色基调页面**
+- **首次启动强制创建管理员账号**
+- **管理员可自定义站点标题、副标题、页脚文字、网站 icon**（本地上传或在线链接）
+- **分享链接前缀可自定义**：管理员可设置 `join_path` 与 `join_param`，生成类似：`https://{domain}/wdf/wdf?rmn=房间代码`
+- **IP 显示规则**：普通用户只看到前两段（如 `1.1.*.*`），管理员可看到完整 IP
+- **用户可自定义昵称**
+
+### 管理功能（新增）
+
+- **删除房间**（级联删除该房间的数据）
+- **修改日志（审计）**：记录项目的添加 / 修改 / 删除 / 恢复 / 回滚，管理员可查看并回滚/恢复
+- **踢人 + 封禁 IP**：支持房间封禁或全局封禁；踢出会让目标用户立即跳转离开房间
+- **审查制度（入房审核）**：
+  - 仅管理员可开启/关闭
+  - 开启后：新用户进入会被拦截，并向房间内所有在线用户发送“加入请求”
+  - **房间内任意在线用户都可以同意或拒绝**（第一位操作生效）
+  - 管理员进入不受影响
+
+## 运行方式
+
+> Python 3.10+ 推荐。
+
+```bash
+cd spinwheel_app
+python -m venv .venv
+source .venv/bin/activate   # Windows 用 .venv\Scripts\activate
+pip install -r requirements.txt
+python app.py
+```
+
+启动后打开：
+
+- `http://127.0.0.1:5000/setup`（首次会自动跳转到这里）创建管理员账号
+- `http://127.0.0.1:5000/admin` 创建房间 / 管理房间
+- `http://127.0.0.1:5000/admin/settings` 修改站点标题/副标题/页脚/icon/分享链接前缀
+
+## 数据与文件
+
+- SQLite 数据库：`data.sqlite3`
+- 上传文件：
+  - `uploads/icons`（站点 icon）
+  - `uploads/items`（项目图片）
+
+## 备注
+
+- 转盘转动期间，为确保所有人看到一致状态，会暂时禁止增删改项目。
+- SSE 需要浏览器支持（现代浏览器基本都支持）。
+- 分享链接的 `{domain}` 会自动使用当前访问的域名（含端口），你只需要在后台配置路径与参数名即可。

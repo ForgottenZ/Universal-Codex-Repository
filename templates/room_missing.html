@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">进入房间</h1>
+  <p class="muted">{{ message }}</p>
+
+  <form method="get" action="{{ url_for('rooms') }}" class="form">
+    <label class="label">房间代码（key）</label>
+    <input class="input" type="text" name="key" placeholder="例如：ABCD1234" />
+    <div class="row">
+      <button class="btn" type="submit">进入</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

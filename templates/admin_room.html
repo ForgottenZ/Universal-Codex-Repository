@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <div class="room-head-top">
+    <div>
+      <h1 class="h1" style="margin:0">房间管理：{{ room.room_name }}</h1>
+      <div class="muted small">房间代码：<code>{{ room.room_key }}</code></div>
+      <div class="muted small">创建时间：{{ room.created_at }}</div>
+    </div>
+    <div style="min-width: 320px;">
+      <div class="muted small">分享链接</div>
+      <div class="share-row">
+        <input class="input" type="text" value="{{ share_url }}" readonly />
+        <button class="btn-mini" type="button" data-copy="{{ share_url }}">复制</button>
+      </div>
+      <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+        <a class="btn-mini" href="{{ share_url }}" target="_blank">打开房间</a>
+        <a class="btn-mini" href="{{ url_for('admin_dashboard') }}">返回面板</a>
+        <form method="post" action="{{ url_for('admin_room_delete', room_key=room.room_key) }}" onsubmit="return confirm('确定删除该房间吗？房间内所有项目、记录、日志、封禁都会一起删除。');" style="margin:0;">
+          <button class="btn-mini btn-danger" type="submit">删除房间</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <h2 class="h2">审查制度（入房审核）</h2>
+  <p class="muted small">开启后：新用户进入会被拦截，并向房间内所有在线用户发送“加入请求”。任何一位在线用户都可以同意/拒绝（第一位操作生效）。管理员进入不受影响。</p>
+  <div class="row" style="flex-wrap:wrap;">
+    <div class="pill">当前状态：
+      {% if room.review_enabled %}
+        <strong style="color: var(--danger);">已开启</strong>
+      {% else %}
+        <strong style="color: var(--accent);">未开启</strong>
+      {% endif %}
+    </div>
+    <form method="post" action="{{ url_for('admin_room_toggle_review', room_key=room.room_key) }}" style="margin:0;">
+      <button class="btn-mini" type="submit">切换开启/关闭</button>
+    </form>
+  </div>
+
+  <hr class="sep" />
+
+  <h2 class="h2">在线用户（完整 IP）</h2>
+  {% if online and online|length > 0 %}
+    <div class="table table-5">
+      <div class="table-head">
+        <div>昵称</div>
+        <div>UID</div>
+        <div>IP</div>
+        <div>身份</div>
+        <div style="text-align:right;">操作</div>
+      </div>
+      {% for u in online %}
+        <div class="table-row">
+          <div><strong>{{ u.nick }}</strong></div>
+          <div class="small"><code>{{ u.uid[:8] }}</code></div>
+          <div><code>{{ u.ip }}</code></div>
+          <div>
+            {% if u.is_admin %}
+              <span class="pill">管理员</span>
+            {% else %}
+              <span class="pill">用户</span>
+            {% endif %}
+          </div>
+          <div style="text-align:right;">
+            {% if not u.is_admin %}
+              <form method="post" action="{{ url_for('admin_room_kick', room_key=room.room_key) }}" style="margin:0; display:inline-flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+                <input type="hidden" name="uid" value="{{ u.uid }}" />
+                <button class="btn-mini" name="action" value="kick" type="submit">踢出</button>
+                <button class="btn-mini btn-danger" name="action" value="ban_room" type="submit" onclick="return confirm('确定房间封禁该 IP 吗？');">房间封禁</button>
+                <button class="btn-mini btn-danger" name="action" value="ban_global" type="submit" onclick="return confirm('确定全局封禁该 IP 吗？');">全局封禁</button>
+              </form>
+            {% else %}
+              <span class="muted small">-</span>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">当前没有在线用户。</p>
+  {% endif %}
+
+  <hr class="sep" />
+
+  <h2 class="h2">封禁列表</h2>
+  <div class="grid-2" style="margin-top: 8px;">
+    <div class="card" style="padding: 12px;">
+      <h3 class="h3">本房间封禁（scope=room）</h3>
+      {% if room_bans and room_bans|length > 0 %}
+        {% for b in room_bans %}
+          <div class="ban-row">
+            <div>
+              <div><code>{{ b.ip }}</code></div>
+              <div class="muted small">{{ b.reason or '' }} · {{ b.created_at }}</div>
+            </div>
+            <form method="post" action="{{ url_for('admin_room_unban', room_key=room.room_key, ban_id=b.id) }}" style="margin:0;">
+              <button class="btn-mini" type="submit">解除</button>
+            </form>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">暂无</p>
+      {% endif %}
+    </div>
+
+    <div class="card" style="padding: 12px;">
+      <h3 class="h3">全局封禁（scope=global）</h3>
+      {% if global_bans and global_bans|length > 0 %}
+        {% for b in global_bans %}
+          <div class="ban-row">
+            <div>
+              <div><code>{{ b.ip }}</code></div>
+              <div class="muted small">{{ b.reason or '' }} · {{ b.created_at }}</div>
+            </div>
+            <form method="post" action="{{ url_for('admin_room_unban', room_key=room.room_key, ban_id=b.id) }}" style="margin:0;">
+              <button class="btn-mini" type="submit">解除</button>
+            </form>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">暂无</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card-sub">
+    <h3 class="h3">手动添加封禁</h3>
+    <form method="post" action="{{ url_for('admin_room_add_ban', room_key=room.room_key) }}" class="form">
+      <label class="label">IP</label>
+      <input class="input" name="ip" type="text" placeholder="例如：1.2.3.4" />
+
+      <label class="label">封禁范围</label>
+      <div class="row" style="flex-wrap:wrap;">
+        <label class="pill"><input type="radio" name="scope" value="room" checked /> 房间封禁</label>
+        <label class="pill"><input type="radio" name="scope" value="global" /> 全局封禁</label>
+      </div>
+
+      <label class="label">原因（可选）</label>
+      <input class="input" name="reason" type="text" maxlength="100" placeholder="可留空" />
+
+      <div class="row">
+        <button class="btn-mini" type="submit">添加封禁</button>
+      </div>
+    </form>
+  </div>
+
+  <hr class="sep" />
+
+  <h2 class="h2">修改日志（项目添加 / 修改 / 删除 / 恢复 / 回滚）</h2>
+  <p class="muted small">提示：回滚会把项目恢复到该条日志的“旧状态”。删除的项目为软删除，可从这里恢复。</p>
+
+  {% if logs and logs|length > 0 %}
+    <div class="table table-6">
+      <div class="table-head">
+        <div>ID</div>
+        <div>时间</div>
+        <div>动作</div>
+        <div>项目ID</div>
+        <div>操作者</div>
+        <div style="text-align:right;">操作</div>
+      </div>
+      {% for l in logs %}
+        <div class="table-row">
+          <div><code>#{{ l.id }}</code></div>
+          <div class="small">{{ l.created_at }}</div>
+          <div><code>{{ l.action }}</code></div>
+          <div><code>{{ l.item_id }}</code></div>
+          <div class="small">{{ l.actor_nick or '' }} · <code>{{ l.actor_ip or '' }}</code></div>
+          <div style="text-align:right;">
+            {% if l.action in ['create','update','delete'] %}
+              <form method="post" action="{{ url_for('admin_room_revert_log', room_key=room.room_key, log_id=l.id) }}" style="margin:0; display:inline;">
+                {% if l.action == 'delete' %}
+                  <button class="btn-mini" type="submit">恢复</button>
+                {% elif l.action == 'create' %}
+                  <button class="btn-mini btn-danger" type="submit" onclick="return confirm('撤销创建会软删除该项目，继续？');">撤销创建</button>
+                {% else %}
+                  <button class="btn-mini" type="submit">回滚</button>
+                {% endif %}
+              </form>
+            {% else %}
+              <span class="muted small">-</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="log-detail">
+          <details>
+            <summary class="muted small">查看 JSON 详情</summary>
+            <div class="log-json">
+              <div class="muted small">old_json</div>
+              <pre>{{ l.old_json or '' }}</pre>
+              <div class="muted small">new_json</div>
+              <pre>{{ l.new_json or '' }}</pre>
+            </div>
+          </details>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">暂无日志。</p>
+  {% endif %}
+</div>
+
+<script>
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-copy]');
+    if (!btn) return;
+    const text = btn.getAttribute('data-copy');
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = '已复制';
+      setTimeout(() => btn.textContent = '复制', 1200);
+    }).catch(() => {
+      alert('复制失败，请手动复制：\n' + text);
+    });
+  });
+</script>
+{% endblock %}

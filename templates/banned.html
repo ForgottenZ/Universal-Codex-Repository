@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">访问被拒绝</h1>
+  <p class="muted">{{ message }}</p>
+  <p class="muted small">如有误封，请联系管理员。</p>
+  <div class="row" style="margin-top:12px;">
+    <a class="btn-mini" href="{{ url_for('index') }}">返回首页</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">站点设置</h1>
+  <p class="muted">这里的设置会影响全站（标题、副标题、页脚、icon、房间分享链接格式）。</p>
+
+  <form method="post" enctype="multipart/form-data" class="form">
+    <label class="label">页面标题</label>
+    <input class="input" type="text" name="site_title" value="{{ settings.site_title }}" />
+
+    <label class="label">副标题</label>
+    <input class="input" type="text" name="site_subtitle" value="{{ settings.site_subtitle }}" />
+
+    <label class="label">页脚文字（底部那一行）</label>
+    <input class="input" type="text" name="footer_text" value="{{ settings.footer_text }}" />
+
+    <hr class="sep" />
+
+    <h2 class="h2">房间分享链接前缀（可自定义）</h2>
+    <p class="muted small">
+      系统会以当前请求的域名作为 <code>{domain}</code>（含端口），生成的分享链接形如：
+      <code>https://{domain}{{ settings.join_path }}?{{ settings.join_param }}=房间代码</code>。
+      <br />
+      例如把路径改成 <code>/wdf/wdf</code>、参数改成 <code>rmn</code>，分享链接就会变成：
+      <code>https://{domain}/wdf/wdf?rmn=XXXXXX</code>。
+    </p>
+
+    <label class="label">加入路径（join_path）</label>
+    <input class="input" type="text" name="join_path" value="{{ settings.join_path }}" placeholder="/rooms" />
+
+    <label class="label">房间代码参数名（join_param）</label>
+    <input class="input" type="text" name="join_param" value="{{ settings.join_param }}" placeholder="key" />
+
+    <hr class="sep" />
+
+    <h2 class="h2">网站 icon</h2>
+    <p class="muted small">可上传本地文件，或填写在线链接。若两者都填，优先使用在线链接。</p>
+
+    <label class="label">icon 在线链接</label>
+    <input class="input" type="url" name="icon_url" placeholder="https://.../favicon.ico" value="{{ settings.icon_url or '' }}" />
+
+    <label class="label">上传本地 icon</label>
+    <input class="input" type="file" name="icon_file" accept="image/*,.ico" />
+
+    <div class="row">
+      <button class="btn" type="submit">保存设置</button>
+    </div>
+  </form>
+
+  <div class="card-sub">
+    <h3 class="h3">当前 icon 预览</h3>
+    {% if settings.icon_url %}
+      <div class="row">
+        <img class="icon-preview" src="{{ settings.icon_url }}" alt="icon" />
+        <div class="muted small">在线链接：<code>{{ settings.icon_url }}</code></div>
+      </div>
+    {% elif settings.icon_path %}
+      <div class="row">
+        <img class="icon-preview" src="{{ url_for('uploaded_file', filename=settings.icon_path) }}" alt="icon" />
+        <div class="muted small">本地文件：<code>{{ settings.icon_path }}</code></div>
+      </div>
+    {% else %}
+      <p class="muted">尚未设置 icon。</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

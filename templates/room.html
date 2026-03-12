@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="room-head card">
+  <div class="room-head-top">
+    <div>
+      <div class="h1" style="margin:0">{{ room.room_name }}</div>
+      <div class="muted small">房间代码：<code id="roomKey">{{ room.room_key }}</code></div>
+    </div>
+    <div class="room-share">
+      <div class="muted small">分享链接</div>
+      <div class="share-row">
+        <input id="shareUrl" class="input" type="text" value="{{ share_url }}" readonly />
+        <button id="copyShare" class="btn-mini" type="button">复制</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="room-meta">
+    <div class="meta-block">
+      <div class="meta-title">我的昵称</div>
+      <div class="row">
+        <input id="nickInput" class="input" type="text" maxlength="30" placeholder="输入昵称" />
+        <button id="saveNick" class="btn-mini" type="button">保存</button>
+      </div>
+      <div class="muted small">你的 IP（对他人显示前两段）：<span id="myIpMasked"></span></div>
+      {% if is_admin %}
+        <div class="muted small">（管理员视角可看到完整 IP）</div>
+      {% endif %}
+    </div>
+
+    <div class="meta-block">
+      <div class="meta-title">在线用户</div>
+      <div class="row">
+        <div class="pill">在线：<span id="onlineCount">0</span></div>
+        <div class="pill">你：<span id="meBadge"></span></div>
+      </div>
+      <div id="onlineList" class="online-list"></div>
+      {% if is_admin %}
+        <div class="muted small" style="margin-top:10px;">管理员可在在线用户后对其踢出/封禁。</div>
+      {% endif %}
+    </div>
+
+    <div class="meta-block">
+      <div class="meta-title">房间状态</div>
+      <div id="roomState" class="muted">加载中...</div>
+      <div id="reviewBadge" class="muted small" style="margin-top:6px;"></div>
+    </div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <h2 class="h2">大转盘</h2>
+    <div class="wheel-wrap">
+      <div class="pointer"></div>
+      <div id="wheelInner" class="wheel-inner">
+        <canvas id="wheelCanvas" width="420" height="420"></canvas>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px; gap:10px;">
+      <button id="spinBtn" class="btn" type="button">开始转动</button>
+      <div id="spinResult" class="muted"></div>
+    </div>
+
+    <div class="muted small" style="margin-top:10px;">提示：转动过程中将暂时禁止增删改项目，确保所有人看到一致的转盘状态。</div>
+  </div>
+
+  <div class="card">
+    <h2 class="h2">项目</h2>
+
+    <form id="addItemForm" class="form">
+      <label class="label">文字</label>
+      <input class="input" type="text" name="text" placeholder="例如：火锅" required />
+
+      <label class="label">占比 / 权重（越大越容易被转到）</label>
+      <input class="input" type="number" name="weight" value="1" min="0" step="0.1" />
+
+      <label class="label">颜色（可选，不填则随机）</label>
+      <div class="row" style="gap:8px;">
+        <input id="addColorPicker" type="color" value="#ffcc00" />
+        <input id="addColorText" class="input" type="text" name="color" placeholder="#RRGGBB（留空=随机）" maxlength="7" />
+      </div>
+      <div class="muted small" style="margin-top:6px;">提示：如果不填颜色，系统会随机分配一个颜色。</div>
+
+      <label class="label">图片（可选）</label>
+      <input class="input" type="url" name="image_url" placeholder="粘贴在线图片链接" />
+      <div class="muted small" style="margin:6px 0;">或上传本地图片：</div>
+      <input class="input" type="file" name="image_file" accept="image/*" />
+
+      <div class="row">
+        <button class="btn" type="submit">添加项目</button>
+      </div>
+    </form>
+
+    <hr class="sep" />
+
+    <div id="itemsBox" class="items-box">
+      <div class="muted">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <h2 class="h2">入房审核（审查制度）</h2>
+  <div id="reviewStatus" class="muted small">加载中...</div>
+  <div id="joinReqBox" class="join-req-box"></div>
+  <div class="muted small" style="margin-top:8px;">说明：当管理员开启审查后，新用户需要房间内任意一位在线用户同意/拒绝后才能进入（管理员不受影响）。</div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <h2 class="h2">转动记录（所有人可见）</h2>
+  <div id="spinsBox" class="spins-box">
+    <div class="muted">加载中...</div>
+  </div>
+</div>
+
+<script>
+  window.ROOM_KEY = "{{ room.room_key }}";
+  window.IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+  window.ME = {{ me_json|safe }};
+</script>
+<script src="{{ url_for('static', filename='room.js') }}"></script>
+{% endblock %}
