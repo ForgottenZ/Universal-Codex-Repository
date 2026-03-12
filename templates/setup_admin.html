@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>创建管理员 - 教学周日历系统</title>
+  <style>
+    body { font-family: Arial, sans-serif; display:flex; justify-content:center; align-items:center; min-height:100vh; margin:0; background:#f5f7fb; }
+    .box { width:420px; background:white; border:1px solid #ddd; border-radius:10px; padding:20px; }
+    input, button { width:100%; margin:6px 0; padding:10px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>首次启动：创建管理员</h2>
+    <p>系统至少需要一个管理员账号。</p>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>{% endif %}
+    {% endwith %}
+    <form method="post" action="/setup-admin">
+      <label>管理员用户名</label><input name="username" required />
+      <label>管理员称呼</label><input name="nickname" required />
+      <label>管理员注册邮箱（收件人）</label><input name="email_addr" type="email" required />
+      <label>管理员密码</label><input type="password" name="password" required />
+      <button type="submit">创建管理员</button>
+    </form>
+  </div>
+</body>
+</html>

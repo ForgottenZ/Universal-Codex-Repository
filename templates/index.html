@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>教学周日历系统</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:20px; }
+    table { border-collapse: collapse; width:100%; }
+    th,td { border:1px solid #ccd7e0; text-align:center; padding:8px; }
+    .weekend { color:#f97316; }
+    .card { border:1px solid #ddd; border-radius:8px; padding:12px; }
+    input, select, textarea, button { width:100%; margin:4px 0; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <h1>{{ cfg.teaching_calendar.term_name }}（当前用户：{{ user.username }} / {{ user.nickname }}）</h1>
+    <form method="post" action="/logout" style="width:180px;"><button type="submit">退出登录</button></form>
+  </div>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}<ul>{% for msg in messages %}<li>{{ msg }}</li>{% endfor %}</ul>{% endif %}
+  {% endwith %}
+
+  <div class="grid">
+    <div class="card">
+      <h2>教学周日历</h2>
+      <table>
+        <tr><th>周次</th><th>周一</th><th>周二</th><th>周三</th><th>周四</th><th>周五</th><th class="weekend">周六</th><th class="weekend">周日</th></tr>
+        {% for w in cal %}
+        <tr>
+          <td>第{{ w.week }}教学周</td>
+          {% for d in w.days %}<td>{{ d.month }}/{{ d.date }}</td>{% endfor %}
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>当前用户配置（通知方式独立）</h2>
+      <form method="post" action="/config">
+        <label>称呼(UserNickname)</label><input name="nickname" value="{{ user.nickname }}" />
+        <label>注册邮箱（接收提醒）</label><input name="email_addr" value="{{ user.email_addr or "" }}" />
+        <label>学期名</label><input name="term_name" value="{{ cfg.teaching_calendar.term_name }}" />
+        <label>开始日期</label><input type="date" name="start_date" value="{{ cfg.teaching_calendar.start_date }}" />
+        <label>结束日期</label><input type="date" name="end_date" value="{{ cfg.teaching_calendar.end_date }}" />
+        <hr/>
+        <label><input type="checkbox" name="push_enabled" {% if user.push_enabled %}checked{% endif %}/> 启用Pushdeer</label>
+        <label>Pushkey</label><input name="pushkey" value="{{ user.pushkey or '' }}" />
+        <label><input type="checkbox" name="email_enabled" {% if user.email_enabled %}checked{% endif %}/> 启用Microsoft Graph邮件</label>
+        <label>Tenant ID</label><input name="tenant_id" value="{{ user.tenant_id or 'common' }}" />
+        <label>Client ID</label><input name="client_id" value="{{ user.client_id or '' }}" />
+        <label>Client Secret</label><input name="client_secret" value="{{ user.client_secret or '' }}" />
+        <label>Sender Email</label><input name="sender_email" value="{{ user.sender_email or '' }}" />
+        <label>Email Subject（邮件标题）</label><input name="email_subject" value="{{ user.email_subject or '教学周提醒' }}" />
+        <hr/>
+        <label><input type="checkbox" name="weekly_enabled" {% if user.weekly_enabled %}checked{% endif %}/> 启用每周报告</label>
+        <label>周报星期（mon~sun）</label><input name="weekly_weekday" value="{{ user.weekly_schedule_weekday or 'mon' }}" />
+        <label>周报时间（HH:MM）</label><input name="weekly_time" value="{{ user.weekly_schedule_time or '12:00' }}" />
+        <label>未来周数</label><input type="number" name="future_weeks" value="{{ user.weekly_future_weeks or 3 }}" />
+        <label>每周报告模板</label>
+        <textarea name="weekly_template" rows="6">{{ user.weekly_template }}</textarea>
+        <button type="submit">保存配置</button>
+      </form>
+    </div>
+  </div>
+
+  {% if user.is_admin %}
+  <div class="card" style="margin-top:20px;">
+    <h2>管理员 - 用户管理（至少保留一个管理员）</h2>
+    <form method="post" action="/admin/users">
+      <div class="grid">
+        <div>
+          <label>用户名</label><input name="username" required />
+          <label>称呼</label><input name="nickname" required />
+          <label>注册邮箱（收件人）</label><input name="email_addr" type="email" required />
+          <label>密码</label><input type="password" name="password" required />
+          <label><input type="checkbox" name="is_admin" /> 设为管理员</label>
+          <button type="submit">创建用户</button>
+        </div>
+        <div>
+          <ul>
+            {% for u in users %}
+            <li>
+              {{ u.username }} / {{ u.nickname }} / {{ u.email_addr or "-" }} {% if u.is_admin %}(管理员){% endif %}
+              <form method="post" action="/admin/users/{{u.id}}/delete" style="display:inline;"><button type="submit" style="width:auto;">删除</button></form>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="grid" style="margin-top:20px;">
+    <div class="card">
+      <h2>新增事件（仅保存到当前用户）</h2>
+      <form method="post" action="/events">
+        <label>名称</label><input name="name" required />
+        <label>类型</label>
+        <select name="event_type" id="event_type">
+          <option value="one_time">单次</option>
+          <option value="recurring">循环</option>
+          <option value="range">覆盖区间</option>
+        </select>
+        <label>开始：第X教学周</label><input type="number" name="start_week" value="1" min="1" />
+        <label>开始：周X(1-7)</label><input type="number" name="start_weekday" value="1" min="1" max="7" />
+        <label>开始时</label><input type="number" name="start_hour" value="8" min="0" max="23" />
+        <label>开始分</label><input type="number" name="start_minute" value="0" min="0" max="59" />
+
+        <div id="range-fields" class="hidden">
+          <label>结束：第X教学周</label><input type="number" name="end_week" />
+          <label>结束：周X(1-7)</label><input type="number" name="end_weekday" />
+          <label>结束时</label><input type="number" name="end_hour" />
+          <label>结束分</label><input type="number" name="end_minute" />
+        </div>
+
+        <div id="recurring-fields" class="hidden">
+          <label>循环间隔：X教学周</label><input type="number" name="repeat_weeks" />
+          <label>循环间隔：X天</label><input type="number" name="repeat_days" />
+          <label>循环间隔：X小时</label><input type="number" name="repeat_hours" />
+          <label>循环间隔：X分钟</label><input type="number" name="repeat_minutes" />
+        </div>
+
+        <label><input type="checkbox" name="remind_push" /> Pushdeer提醒</label>
+        <label><input type="checkbox" name="remind_email" /> 邮件提醒</label>
+        <label>提醒内容</label><textarea name="remind_text"></textarea>
+        <label>备注</label><textarea name="note"></textarea>
+        <button type="submit">创建事件</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>测试通知（当前用户）</h2>
+      <form method="post" action="/test-notify">
+        <label><input type="checkbox" name="use_push" checked /> Pushdeer</label>
+        <label><input type="checkbox" name="use_email" checked /> Email</label>
+        <label>测试内容</label><textarea name="content" rows="4">这是一条测试通知。</textarea>
+        <button type="submit">发送测试通知</button>
+      </form>
+
+      <h2>我的事件列表</h2>
+      <ul>
+      {% for e in events %}
+        <li>[{{ e.event_type }}] {{ e.name }}
+          <form method="post" action="/events/{{e.id}}/delete" style="display:inline;"><button type="submit" style="width:auto;">删除</button></form>
+        </li>
+      {% else %}
+        <li>暂无事件</li>
+      {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+<script>
+const typeEl = document.getElementById('event_type');
+const recurring = document.getElementById('recurring-fields');
+const range = document.getElementById('range-fields');
+function updateFields() {
+  const t = typeEl.value;
+  recurring.classList.toggle('hidden', t !== 'recurring');
+  range.classList.toggle('hidden', t !== 'range');
+}
+typeEl.addEventListener('change', updateFields);
+updateFields();
+</script>
+</body>
+</html>
