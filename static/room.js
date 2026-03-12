@@ -150,10 +150,12 @@
   }
 
   function updateUIFromSnapshot() {
+    const me = snapshot.me || {};
+
     // Me
-    elNickInput.value = snapshot.me.nick || '';
-    elMyIpMasked.textContent = snapshot.me.masked_ip || '';
-    elMeBadge.textContent = `${snapshot.me.nick || '我'} (${snapshot.me.masked_ip || ''})`;
+    elNickInput.value = me.nick || '';
+    elMyIpMasked.textContent = me.masked_ip || '';
+    elMeBadge.textContent = `${me.nick || '我'} (${me.masked_ip || ''})`;
 
     // Review badge
     const reviewEnabled = !!snapshot.room.review_enabled;
@@ -535,8 +537,8 @@
       }
 
       // Local prediction: choose same item index if we can match snapshot id
-      const spin = data.spin;
-      const idx = wheel.segments.findIndex((s) => s.id === spin.item_id);
+      const selectedItemId = data.selected_item_id || data?.spin?.item_id;
+      const idx = wheel.segments.findIndex((s) => s.id === selectedItemId);
       if (idx >= 0) {
         animateSpinTo(idx);
       } else {
@@ -544,7 +546,8 @@
         animateSpinTo(Math.floor(Math.random() * wheel.segments.length));
       }
 
-      elSpinResult.innerHTML = `已开始转动：<strong>${escapeHtml(spin.created_by_nick || '')}</strong>`;
+      const startedBy = data?.spin?.created_by_nick || snapshot?.me?.nick || '';
+      elSpinResult.innerHTML = `已开始转动：<strong>${escapeHtml(startedBy)}</strong>`;
     } catch (e) {
       elSpinResult.textContent = e.message || '转动失败';
       wheel.spinning = false;
@@ -562,9 +565,12 @@
     if (!res.ok) return;
     const data = await res.json();
     if (!data.ok) return;
-    snapshot.me = data.me;
-    elMyIpMasked.textContent = snapshot.me.masked_ip || '';
-    elMeBadge.textContent = `${snapshot.me.nick || '我'} (${snapshot.me.masked_ip || ''})`;
+    if (data.me) {
+      snapshot.me = data.me;
+    }
+    const me = snapshot.me || {};
+    elMyIpMasked.textContent = me.masked_ip || '';
+    elMeBadge.textContent = `${me.nick || '我'} (${me.masked_ip || ''})`;
   }
 
   async function decideJoin(requestId, decision) {
