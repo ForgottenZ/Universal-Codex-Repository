@@ -184,6 +184,10 @@ def write_debug_bat(script_path: str, python_exe: str, script_dir: str, logger: 
         "pause\n"
     )
 
+    if os.path.exists(bat_path):
+        logger.info("调试 BAT 已存在，跳过重写：%s", bat_path)
+        return
+
     try:
         with open(bat_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -392,7 +396,7 @@ def run_startup_probe(
     last_total_write: Optional[int],
     traffic_history: Optional[deque],
     debugnet_seconds: Optional[int]
-) -> Tuple[datetime.datetime, datetime.datetime, Optional[int], int, bool]:
+) -> Tuple[datetime.datetime, datetime.datetime, Optional[int], int, bool, Optional[datetime.datetime]]:
     """
     启动时先监听前 startup_check_seconds 秒的流量：
     - 若结束时“不满足断开连接条件”（consecutive_zeros < ZERO_THRESHOLD），
@@ -400,7 +404,7 @@ def run_startup_probe(
     - 且这 startup_check_seconds 秒要纳入最终连接时长统计。
 
     返回：
-      startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected
+      startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected, detected_session_start
     """
     effective_seconds = max(startup_check_seconds, ZERO_THRESHOLD)
     if effective_seconds != startup_check_seconds:
@@ -413,6 +417,7 @@ def run_startup_probe(
     logger.info("--- 启动判定：监听前 %d 秒流量以判断初始是否已处于连接状态 ---", effective_seconds)
 
     consecutive_zeros = 0
+    detected_session_start: Optional[datetime.datetime] = None
 
     for i in range(effective_seconds):
         now = datetime.datetime.now()
@@ -423,6 +428,26 @@ def run_startup_probe(
             consecutive_zeros += 1
         else:
             consecutive_zeros = 0
+
+        # 启动探测期间如果出现高流量，认为“刚刚开始连接”，直接结束启动探测
+        if traffic_delta_kb > TRAFFIC_HIGH_THRESHOLD_KB:
+            detected_session_start = now
+            logger.info(
+                "启动探测期间检测到高流量 %.2f KB/s，提前结束探测，判定为【刚刚开始连接】",
+                traffic_delta_kb
+            )
+            if traffic_history is not None and debugnet_seconds is not None:
+                traffic_history.append((now, traffic_delta_kb))
+                render_debugnet_screen(
+                    history=traffic_history,
+                    history_seconds=debugnet_seconds,
+                    current_kb=traffic_delta_kb,
+                    proc_count=proc_count,
+                    in_session=True,
+                    consecutive_zeros=consecutive_zeros,
+                    mode_label=f"启动判定中 ({i + 1}/{effective_seconds})"
+                )
+            break
 
         if traffic_history is not None and debugnet_seconds is not None:
             traffic_history.append((now, traffic_delta_kb))
@@ -441,6 +466,9 @@ def run_startup_probe(
 
     startup_end = datetime.datetime.now()
 
+    if detected_session_start is not None:
+        return startup_begin, startup_end, last_total_write, consecutive_zeros, True, detected_session_start
+
     # 如果到启动判定结束时，仍然“不满足断开连接条件”，
     # 就认为这段时间本来就在连接中
     starts_connected = consecutive_zeros < ZERO_THRESHOLD
@@ -457,7 +485,7 @@ def run_startup_probe(
             effective_seconds
         )
 
-    return startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected
+    return startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected, None
 
 
 def monitor_system(
@@ -486,7 +514,7 @@ def monitor_system(
     traffic_history = deque(maxlen=debugnet_seconds) if debugnet_seconds is not None else None
 
     # 0) 启动判定：先监听前 X 秒
-    startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected = run_startup_probe(
+    startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected, detected_session_start = run_startup_probe(
         logger=logger,
         startup_check_seconds=startup_check_seconds,
         last_total_write=last_total_write,
@@ -497,12 +525,18 @@ def monitor_system(
     if starts_connected:
         # 认为启动时就已经在连接中，并把最开始这段时间纳入总连接时长
         in_session = True
-        session_start_time = startup_begin
+        session_start_time = detected_session_start or startup_begin
         timeout_timer_start = None
-        logger.info(
-            "[系统启动] 初始状态判定为连接中，连接开始时间按程序启动时刻计：%s",
-            startup_begin.strftime("%Y-%m-%d %H:%M:%S")
-        )
+        if detected_session_start is not None:
+            logger.info(
+                "[系统启动] 启动探测期间出现高流量，连接开始时间按探测命中时刻计：%s",
+                detected_session_start.strftime("%Y-%m-%d %H:%M:%S")
+            )
+        else:
+            logger.info(
+                "[系统启动] 初始状态判定为连接中，连接开始时间按程序启动时刻计：%s",
+                startup_begin.strftime("%Y-%m-%d %H:%M:%S")
+            )
     else:
         # 认为启动时为空闲；启动监听期也计入空闲超时
         in_session = False
