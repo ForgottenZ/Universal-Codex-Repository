@@ -3,6 +3,8 @@ import ctypes
 import datetime
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
 from collections import deque
@@ -41,6 +43,11 @@ REMINDER_ENABLED = {
     "shutdown_warning": True,
 }
 
+DISABLE_FILE_PATH = r"D:\uuyc.disable"  # 存在则进入离线模式
+SCREENSHOT_SAVE_DIR = r"D:\uuyc-snapshots"
+SCREENSHOT_INTERVAL_MINUTES = 20
+SCREENSHOT_RETENTION_DAYS = 90
+
 RUN_VALUE_NAME = "UUYC_Monitor"   # 注册表启动项名称
 # =========================================
 
@@ -59,6 +66,11 @@ def get_app_dir() -> str:
 
 def is_reminder_enabled(kind: str) -> bool:
     return bool(REMINDER_ENABLED.get(kind, True))
+
+
+def is_offline_mode() -> bool:
+    """离线模式：disable 文件存在时，不执行提醒/监控相关逻辑，仅保活与截图。"""
+    return os.path.exists(DISABLE_FILE_PATH)
 
 
 APP_DIR = get_app_dir()
@@ -311,6 +323,66 @@ def parse_debug_switches(argv: List[str]) -> set:
         if name:
             switches.add(name)
     return switches
+
+
+def ensure_screenshot_retention(root_dir: str, keep_days: int, logger: logging.Logger) -> None:
+    """
+    只保留最近 keep_days 个“日期文件夹”（yyyy-mm-dd）。
+    若超过则按日期从旧到新删除，直到数量 <= keep_days。
+    """
+    try:
+        os.makedirs(root_dir, exist_ok=True)
+        day_dirs = []
+        for name in os.listdir(root_dir):
+            path = os.path.join(root_dir, name)
+            if os.path.isdir(path):
+                day_dirs.append((name, path))
+
+        day_dirs.sort(key=lambda x: x[0])  # yyyy-mm-dd 字符串可直接排序
+        while len(day_dirs) > keep_days:
+            day_name, day_path = day_dirs.pop(0)
+            try:
+                shutil.rmtree(day_path)
+                logger.info("截图留存清理：已删除最早目录 %s", day_name)
+            except Exception as e:
+                logger.error("截图留存清理失败（%s）：%s", day_name, e)
+                break
+    except Exception as e:
+        logger.error("截图留存检查失败：%s", e)
+
+
+def capture_fullscreen_to_jpg(root_dir: str, logger: logging.Logger) -> None:
+    """
+    全屏截图保存为：
+      指定目录/yyyy-mm-dd/HH-MM-SS.jpg
+    """
+    now = datetime.datetime.now()
+    day_dir = os.path.join(root_dir, now.strftime("%Y-%m-%d"))
+    os.makedirs(day_dir, exist_ok=True)
+    target_file = os.path.join(day_dir, now.strftime("%H-%M-%S.jpg"))
+
+    # 使用 PowerShell + .NET 截图，避免引入第三方依赖
+    ps_script = rf"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+$bitmap.Save("{target_file}", [System.Drawing.Imaging.ImageFormat]::Jpeg)
+$graphics.Dispose()
+$bitmap.Dispose()
+"""
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logger.info("已保存全屏截图：%s", target_file)
+    except Exception as e:
+        logger.error("保存全屏截图失败：%s", e)
 
 
 def set_run_key(value: str, logger: logging.Logger) -> bool:
@@ -611,17 +683,27 @@ def monitor_system(
     timeout_hits = 0
     shutdown_scheduled = False
     debug_switches = debug_switches or set()
+    offline_logged = False
+    next_screenshot_time = datetime.datetime.now()
 
     traffic_history = deque(maxlen=debugnet_seconds) if debugnet_seconds is not None else None
 
-    # 0) 启动判定：先监听前 X 秒
-    startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected, detected_session_start = run_startup_probe(
-        logger=logger,
-        startup_check_seconds=startup_check_seconds,
-        last_total_write=last_total_write,
-        traffic_history=traffic_history,
-        debugnet_seconds=debugnet_seconds
-    )
+    # 0) 启动判定：先监听前 X 秒（若已离线则跳过）
+    if is_offline_mode():
+        startup_begin = datetime.datetime.now()
+        startup_end = startup_begin
+        consecutive_zeros = 0
+        starts_connected = False
+        detected_session_start = None
+        logger.warning("启动时检测到 %s，跳过启动探测，进入离线保活模式。", DISABLE_FILE_PATH)
+    else:
+        startup_begin, startup_end, last_total_write, consecutive_zeros, starts_connected, detected_session_start = run_startup_probe(
+            logger=logger,
+            startup_check_seconds=startup_check_seconds,
+            last_total_write=last_total_write,
+            traffic_history=traffic_history,
+            debugnet_seconds=debugnet_seconds
+        )
 
     if starts_connected:
         # 认为启动时就已经在连接中，并把最开始这段时间纳入总连接时长
@@ -650,22 +732,43 @@ def monitor_system(
 
     # debug 项：立即测试关机提醒链路
     if "shutdown" in debug_switches and not shutdown_scheduled:
-        shutdown_scheduled = True
-        logger.warning("[DEBUG] --debug-shutdown 已启用：立即触发关机提醒与关机命令测试。")
-        if is_reminder_enabled("shutdown_warning"):
-            show_shutdown_warning_popup(logger)
-            send_pushdeer(
-                "关机提醒（DEBUG）",
-                f"已触发 --debug-shutdown，执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
-                logger=logger
-            )
+        if is_offline_mode():
+            logger.warning("[DEBUG] --debug-shutdown 已请求，但当前为离线模式，按规则跳过。")
         else:
-            logger.info("提醒开关关闭：shutdown_warning，跳过 DEBUG 关机提醒弹窗与推送。")
-        schedule_forced_shutdown(logger)
+            shutdown_scheduled = True
+            logger.warning("[DEBUG] --debug-shutdown 已启用：立即触发关机提醒与关机命令测试。")
+            if is_reminder_enabled("shutdown_warning") and (not is_offline_mode()):
+                show_shutdown_warning_popup(logger)
+                send_pushdeer(
+                    "关机提醒（DEBUG）",
+                    f"已触发 --debug-shutdown，执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
+                    logger=logger
+                )
+            else:
+                logger.info("提醒关闭或离线模式：跳过 DEBUG 关机提醒弹窗与推送。")
+            schedule_forced_shutdown(logger)
 
     # 1) 正常监控循环
     while True:
         now = datetime.datetime.now()
+
+        # 周期截图（无论是否离线都执行）
+        if now >= next_screenshot_time:
+            capture_fullscreen_to_jpg(SCREENSHOT_SAVE_DIR, logger)
+            ensure_screenshot_retention(SCREENSHOT_SAVE_DIR, SCREENSHOT_RETENTION_DAYS, logger)
+            next_screenshot_time = now + datetime.timedelta(minutes=SCREENSHOT_INTERVAL_MINUTES)
+
+        # 离线模式：仅保活 + 截图，不执行其它监控/提醒逻辑
+        if is_offline_mode():
+            if not offline_logged:
+                logger.warning("检测到 %s，进入离线模式：暂停监控与提醒，仅保活和周期截图。", DISABLE_FILE_PATH)
+                offline_logged = True
+            time.sleep(1)
+            continue
+        if offline_logged:
+            logger.info("离线模式已解除（%s 不存在），恢复正常监控。", DISABLE_FILE_PATH)
+            offline_logged = False
+
         total_write, proc_count, traffic_delta_kb = sample_traffic(TARGET_PROCESS, last_total_write)
         last_total_write = total_write
 
@@ -695,10 +798,10 @@ def monitor_system(
             duration = (end_time - session_start_time).total_seconds() if session_start_time else 0
 
             msg = f"时长: {format_duration(duration)}"
-            if is_reminder_enabled("session_end"):
+            if is_reminder_enabled("session_end") and (not is_offline_mode()):
                 send_pushdeer("连入流程结束", msg, logger=logger)
             else:
-                logger.info("提醒开关关闭：session_end，跳过“连入流程结束”推送。")
+                logger.info("提醒关闭或离线模式：跳过“连入流程结束”推送。")
             logger.info("<<< [连入结束] %s", msg)
 
             in_session = False
@@ -715,14 +818,14 @@ def monitor_system(
 
             elapsed = (now - timeout_timer_start).total_seconds()
             if elapsed >= TIMEOUT_MINUTES * 60:
-                if is_reminder_enabled("timeout_warning"):
+                if is_reminder_enabled("timeout_warning") and (not is_offline_mode()):
                     send_pushdeer(
                         "设备超时警告",
                         f"设备空闲已超过 {TIMEOUT_MINUTES} 分钟。",
                         logger=logger
                     )
                 else:
-                    logger.info("提醒开关关闭：timeout_warning，跳过“设备超时警告”推送。")
+                    logger.info("提醒关闭或离线模式：跳过“设备超时警告”推送。")
                 logger.warning(
                     "!!! [超时触发] 已空闲 %d 分钟，发送通知并重置",
                     TIMEOUT_MINUTES
@@ -735,7 +838,7 @@ def monitor_system(
 
                 if (not shutdown_scheduled) and timeout_hits >= SHUTDOWN_TRIGGER_TIMEOUT_HITS:
                     shutdown_scheduled = True
-                    if is_reminder_enabled("shutdown_warning"):
+                    if is_reminder_enabled("shutdown_warning") and (not is_offline_mode()):
                         show_shutdown_warning_popup(logger)
                         send_pushdeer(
                             "关机提醒",
@@ -743,7 +846,7 @@ def monitor_system(
                             logger=logger
                         )
                     else:
-                        logger.info("提醒开关关闭：shutdown_warning，跳过关机提醒弹窗与推送。")
+                        logger.info("提醒关闭或离线模式：跳过关机提醒弹窗与推送。")
                     schedule_forced_shutdown(logger)
 
                 timeout_timer_start = datetime.datetime.now()
