@@ -30,6 +30,17 @@ SHUTDOWN_COMMAND_SECONDS = 120       # 达成阈值后直接执行 shutdown -s -
 
 DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断初始是否已在连接中
 
+# 提醒开关配置（True=启用，False=禁用）
+# 可配置项：
+# - session_end: 连入流程结束提醒
+# - timeout_warning: 设备超时警告提醒
+# - shutdown_warning: 关机提醒（含弹窗与 push）
+REMINDER_ENABLED = {
+    "session_end": True,
+    "timeout_warning": True,
+    "shutdown_warning": True,
+}
+
 RUN_VALUE_NAME = "UUYC_Monitor"   # 注册表启动项名称
 # =========================================
 
@@ -44,6 +55,10 @@ def get_app_dir() -> str:
     path = os.path.join(base, "uuyc-monitor")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def is_reminder_enabled(kind: str) -> bool:
+    return bool(REMINDER_ENABLED.get(kind, True))
 
 
 APP_DIR = get_app_dir()
@@ -637,12 +652,15 @@ def monitor_system(
     if "shutdown" in debug_switches and not shutdown_scheduled:
         shutdown_scheduled = True
         logger.warning("[DEBUG] --debug-shutdown 已启用：立即触发关机提醒与关机命令测试。")
-        show_shutdown_warning_popup(logger)
-        send_pushdeer(
-            "关机提醒（DEBUG）",
-            f"已触发 --debug-shutdown，执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
-            logger=logger
-        )
+        if is_reminder_enabled("shutdown_warning"):
+            show_shutdown_warning_popup(logger)
+            send_pushdeer(
+                "关机提醒（DEBUG）",
+                f"已触发 --debug-shutdown，执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
+                logger=logger
+            )
+        else:
+            logger.info("提醒开关关闭：shutdown_warning，跳过 DEBUG 关机提醒弹窗与推送。")
         schedule_forced_shutdown(logger)
 
     # 1) 正常监控循环
@@ -677,7 +695,10 @@ def monitor_system(
             duration = (end_time - session_start_time).total_seconds() if session_start_time else 0
 
             msg = f"时长: {format_duration(duration)}"
-            send_pushdeer("连入流程结束", msg, logger=logger)
+            if is_reminder_enabled("session_end"):
+                send_pushdeer("连入流程结束", msg, logger=logger)
+            else:
+                logger.info("提醒开关关闭：session_end，跳过“连入流程结束”推送。")
             logger.info("<<< [连入结束] %s", msg)
 
             in_session = False
@@ -694,11 +715,14 @@ def monitor_system(
 
             elapsed = (now - timeout_timer_start).total_seconds()
             if elapsed >= TIMEOUT_MINUTES * 60:
-                send_pushdeer(
-                    "设备超时警告",
-                    f"设备空闲已超过 {TIMEOUT_MINUTES} 分钟。",
-                    logger=logger
-                )
+                if is_reminder_enabled("timeout_warning"):
+                    send_pushdeer(
+                        "设备超时警告",
+                        f"设备空闲已超过 {TIMEOUT_MINUTES} 分钟。",
+                        logger=logger
+                    )
+                else:
+                    logger.info("提醒开关关闭：timeout_warning，跳过“设备超时警告”推送。")
                 logger.warning(
                     "!!! [超时触发] 已空闲 %d 分钟，发送通知并重置",
                     TIMEOUT_MINUTES
@@ -711,12 +735,15 @@ def monitor_system(
 
                 if (not shutdown_scheduled) and timeout_hits >= SHUTDOWN_TRIGGER_TIMEOUT_HITS:
                     shutdown_scheduled = True
-                    show_shutdown_warning_popup(logger)
-                    send_pushdeer(
-                        "关机提醒",
-                        f"设备已连续空闲超过 2 小时，已执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
-                        logger=logger
-                    )
+                    if is_reminder_enabled("shutdown_warning"):
+                        show_shutdown_warning_popup(logger)
+                        send_pushdeer(
+                            "关机提醒",
+                            f"设备已连续空闲超过 2 小时，已执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
+                            logger=logger
+                        )
+                    else:
+                        logger.info("提醒开关关闭：shutdown_warning，跳过关机提醒弹窗与推送。")
                     schedule_forced_shutdown(logger)
 
                 timeout_timer_start = datetime.datetime.now()
