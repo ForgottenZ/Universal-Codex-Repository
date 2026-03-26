@@ -1,18 +1,21 @@
 import argparse
+import ctypes
 import datetime
 import logging
 import os
 import sys
 import time
+import threading
 from collections import deque
 from logging.handlers import RotatingFileHandler
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import psutil
 import requests
 import winreg
 
 # ================= 配置区 =================
+# 支持多个 key：可填列表，或逗号分隔字符串
 PUSH_KEY = "你的PushDeer_Key_填在这里"
 TARGET_PROCESS = "gameviewerserver.exe"
 
@@ -23,6 +26,8 @@ TRAFFIC_HIGH_THRESHOLD_KB = 100   # KB/s，超过认为“连入开始”
 ZERO_THRESHOLD = 30               # 连续“近似0流量”的秒数，认为“连入结束”
 ZERO_KB_EPS = 1.0                 # <= 1KB/s 都当作 0（防止极小写入打断计数）
 TIMEOUT_MINUTES = 20              # 空闲超时提醒（分钟）
+SHUTDOWN_TRIGGER_TIMEOUT_HITS = 6  # 连续超时提醒次数达到该值后，触发关机流程（6 * 20min = 120min）
+SHUTDOWN_COUNTDOWN_SECONDS = 60     # 弹窗后倒计时秒数，结束后立即关机
 
 DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断初始是否已在连接中
 
@@ -197,23 +202,89 @@ def write_debug_bat(script_path: str, python_exe: str, script_dir: str, logger: 
 
 
 def send_pushdeer(text: str, desp: str = "", logger: Optional[logging.Logger] = None) -> None:
-    if not PUSH_KEY or "填在这里" in PUSH_KEY:
+    keys = normalize_push_keys(PUSH_KEY)
+    if not keys:
         if logger:
             logger.warning("PushDeer Key 未设置，跳过发送：%s", text)
         return
 
     url = "https://api2.pushdeer.com/message/push"
-    try:
-        r = requests.get(
-            url,
-            params={"pushkey": PUSH_KEY, "text": text, "desp": desp},
-            timeout=5
+    for key in keys:
+        try:
+            r = requests.get(
+                url,
+                params={"pushkey": key, "text": text, "desp": desp},
+                timeout=5
+            )
+            if logger:
+                logger.info("[通知] 已发送：%s（key=%s, HTTP %s）", text, key[:6] + "***", r.status_code)
+        except Exception as e:
+            if logger:
+                logger.error("[错误] 通知发送失败（key=%s）：%s", key[:6] + "***", e)
+
+
+def normalize_push_keys(push_key_value: object) -> List[str]:
+    """支持 str/list/tuple/set；str 可用逗号、分号、换行分隔多个 key。"""
+    if push_key_value is None:
+        return []
+
+    if isinstance(push_key_value, str):
+        raw_items = (
+            push_key_value
+            .replace("；", ",")
+            .replace(";", ",")
+            .replace("\n", ",")
+            .split(",")
         )
-        if logger:
-            logger.info("[通知] 已发送：%s（HTTP %s）", text, r.status_code)
+    elif isinstance(push_key_value, (list, tuple, set)):
+        raw_items = [str(x) for x in push_key_value]
+    else:
+        raw_items = [str(push_key_value)]
+
+    keys: List[str] = []
+    for item in raw_items:
+        key = item.strip()
+        if not key:
+            continue
+        if "填在这里" in key:
+            continue
+        keys.append(key)
+
+    # 去重并保持顺序
+    deduped: List[str] = []
+    seen = set()
+    for key in keys:
+        if key.lower() in seen:
+            continue
+        seen.add(key.lower())
+        deduped.append(key)
+    return deduped
+
+
+def show_shutdown_warning_popup(logger: logging.Logger) -> None:
+    msg = (
+        "设备已连续空闲超过 2 小时（6 次 20 分钟）。\n"
+        "系统将在 1 分钟后自动关机。"
+    )
+    title = "UUYC Monitor 关机提醒"
+    try:
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)  # MB_ICONWARNING
+        logger.warning("已显示关机提醒弹窗。")
     except Exception as e:
-        if logger:
-            logger.error("[错误] 通知发送失败：%s", e)
+        logger.error("显示关机提醒弹窗失败：%s", e)
+
+
+def schedule_forced_shutdown(logger: logging.Logger) -> None:
+    def _shutdown_worker() -> None:
+        logger.warning("关机倒计时开始：%d 秒后执行 shutdown -s -t 0", SHUTDOWN_COUNTDOWN_SECONDS)
+        time.sleep(SHUTDOWN_COUNTDOWN_SECONDS)
+        rc = os.system("shutdown -s -t 0")
+        if rc == 0:
+            logger.warning("已执行关机命令：shutdown -s -t 0")
+        else:
+            logger.error("关机命令执行失败，返回码：%s", rc)
+
+    threading.Thread(target=_shutdown_worker, daemon=True).start()
 
 
 def set_run_key(value: str, logger: logging.Logger) -> bool:
@@ -510,6 +581,8 @@ def monitor_system(
     session_start_time: Optional[datetime.datetime] = None
     timeout_timer_start: Optional[datetime.datetime] = None
     last_total_write: Optional[int] = None
+    timeout_hits = 0
+    shutdown_scheduled = False
 
     traffic_history = deque(maxlen=debugnet_seconds) if debugnet_seconds is not None else None
 
@@ -565,6 +638,7 @@ def monitor_system(
                 in_session = True
                 session_start_time = now
                 timeout_timer_start = None
+                timeout_hits = 0
                 logger.info(
                     ">>> [连入开始] 高流量 %.2f KB/s，匹配进程数=%d",
                     traffic_delta_kb, proc_count
@@ -604,6 +678,22 @@ def monitor_system(
                     "!!! [超时触发] 已空闲 %d 分钟，发送通知并重置",
                     TIMEOUT_MINUTES
                 )
+                timeout_hits += 1
+                logger.warning(
+                    "!!! [超时累计] 连续空闲超时次数：%d/%d",
+                    timeout_hits, SHUTDOWN_TRIGGER_TIMEOUT_HITS
+                )
+
+                if (not shutdown_scheduled) and timeout_hits >= SHUTDOWN_TRIGGER_TIMEOUT_HITS:
+                    shutdown_scheduled = True
+                    show_shutdown_warning_popup(logger)
+                    send_pushdeer(
+                        "关机提醒",
+                        f"设备已连续空闲超过 2 小时，将在 {SHUTDOWN_COUNTDOWN_SECONDS} 秒后自动关机。",
+                        logger=logger
+                    )
+                    schedule_forced_shutdown(logger)
+
                 timeout_timer_start = datetime.datetime.now()
 
         # 4) debugnet 屏幕显示
