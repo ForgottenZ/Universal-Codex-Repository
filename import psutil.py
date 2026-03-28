@@ -4,9 +4,9 @@ import datetime
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import time
+import struct
 from collections import deque
 from logging.handlers import RotatingFileHandler
 from typing import List, Optional, Tuple
@@ -354,35 +354,123 @@ def ensure_screenshot_retention(root_dir: str, keep_days: int, logger: logging.L
 def capture_fullscreen_to_jpg(root_dir: str, logger: logging.Logger) -> None:
     """
     全屏截图保存为：
-      指定目录/yyyy-mm-dd/HH-MM-SS.jpg
+      指定目录/yyyy-mm-dd/HH-MM-SS.bmp
     """
     now = datetime.datetime.now()
     day_dir = os.path.join(root_dir, now.strftime("%Y-%m-%d"))
     os.makedirs(day_dir, exist_ok=True)
-    target_file = os.path.join(day_dir, now.strftime("%H-%M-%S.jpg"))
+    target_file = os.path.join(day_dir, now.strftime("%H-%M-%S.bmp"))
 
-    # 使用 PowerShell + .NET 截图，避免引入第三方依赖
-    ps_script = rf"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bitmap.Save("{target_file}", [System.Drawing.Imaging.ImageFormat]::Jpeg)
-$graphics.Dispose()
-$bitmap.Dispose()
-"""
+    # 使用 Win32 GDI 直接截图，避免调用 PowerShell 时弹窗
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    SRCCOPY = 0x00CC0020
+
+    width = user32.GetSystemMetrics(0)
+    height = user32.GetSystemMetrics(1)
+    if width <= 0 or height <= 0:
+        logger.error("保存全屏截图失败：无效屏幕尺寸 %sx%s", width, height)
+        return
+
+    hdc_screen = None
+    hdc_mem = None
+    hbitmap = None
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-            check=True,
-            capture_output=True,
-            text=True
+        hdc_screen = user32.GetDC(0)
+        if not hdc_screen:
+            raise RuntimeError("GetDC 失败")
+
+        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+        if not hdc_mem:
+            raise RuntimeError("CreateCompatibleDC 失败")
+
+        hbitmap = gdi32.CreateCompatibleBitmap(hdc_screen, width, height)
+        if not hbitmap:
+            raise RuntimeError("CreateCompatibleBitmap 失败")
+
+        if not gdi32.SelectObject(hdc_mem, hbitmap):
+            raise RuntimeError("SelectObject 失败")
+
+        if not gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY):
+            raise RuntimeError("BitBlt 失败")
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", ctypes.c_uint32),
+                ("biWidth", ctypes.c_int32),
+                ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16),
+                ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32),
+                ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32),
+                ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32),
+            ]
+
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth = width
+        bi.biHeight = height  # bottom-up
+        bi.biPlanes = 1
+        bi.biBitCount = 24
+        bi.biCompression = 0  # BI_RGB
+
+        row_stride = (width * 3 + 3) & ~3
+        image_size = row_stride * height
+        pixel_buf = ctypes.create_string_buffer(image_size)
+        DIB_RGB_COLORS = 0
+        scan_lines = gdi32.GetDIBits(
+            hdc_mem,
+            hbitmap,
+            0,
+            height,
+            pixel_buf,
+            ctypes.byref(bi),
+            DIB_RGB_COLORS
         )
+        if scan_lines != height:
+            raise RuntimeError(f"GetDIBits 失败，scan_lines={scan_lines}")
+
+        file_header = struct.pack(
+            "<2sIHHI",
+            b"BM",
+            14 + 40 + image_size,
+            0,
+            0,
+            14 + 40
+        )
+        info_header = struct.pack(
+            "<IIIHHIIIIII",
+            40,
+            width,
+            height,
+            1,
+            24,
+            0,
+            image_size,
+            0,
+            0,
+            0,
+            0
+        )
+
+        with open(target_file, "wb") as f:
+            f.write(file_header)
+            f.write(info_header)
+            f.write(pixel_buf.raw)
+
         logger.info("已保存全屏截图：%s", target_file)
     except Exception as e:
         logger.error("保存全屏截图失败：%s", e)
+    finally:
+        if hbitmap:
+            gdi32.DeleteObject(hbitmap)
+        if hdc_mem:
+            gdi32.DeleteDC(hdc_mem)
+        if hdc_screen:
+            user32.ReleaseDC(0, hdc_screen)
 
 
 def set_run_key(value: str, logger: logging.Logger) -> bool:
