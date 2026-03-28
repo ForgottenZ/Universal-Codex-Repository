@@ -327,28 +327,73 @@ def parse_debug_switches(argv: List[str]) -> set:
 
 def ensure_screenshot_retention(root_dir: str, keep_days: int, logger: logging.Logger) -> None:
     """
-    只保留最近 keep_days 个“日期文件夹”（yyyy-mm-dd）。
-    若超过则按日期从旧到新删除，直到数量 <= keep_days。
+    仅保留最近 keep_days 天（含今天）的“日期文件夹”（yyyy-mm-dd）。
+    示例：keep_days=90 时，今天是 03-29，则 03-28 必须保留，不应被删。
     """
     try:
+        if keep_days <= 0:
+            logger.warning("截图留存天数配置无效（%s），跳过清理。", keep_days)
+            return
+
         os.makedirs(root_dir, exist_ok=True)
-        day_dirs = []
+        cutoff_date = datetime.date.today() - datetime.timedelta(days=keep_days - 1)
         for name in os.listdir(root_dir):
             path = os.path.join(root_dir, name)
-            if os.path.isdir(path):
-                day_dirs.append((name, path))
+            if not os.path.isdir(path):
+                continue
 
-        day_dirs.sort(key=lambda x: x[0])  # yyyy-mm-dd 字符串可直接排序
-        while len(day_dirs) > keep_days:
-            day_name, day_path = day_dirs.pop(0)
             try:
-                shutil.rmtree(day_path)
-                logger.info("截图留存清理：已删除最早目录 %s", day_name)
+                folder_date = datetime.datetime.strptime(name, "%Y-%m-%d").date()
+            except ValueError:
+                logger.debug("截图留存清理：跳过非日期目录 %s", name)
+                continue
+
+            if folder_date >= cutoff_date:
+                continue
+
+            try:
+                shutil.rmtree(path)
+                logger.info("截图留存清理：已删除过期目录 %s（截止日期：%s）", name, cutoff_date)
             except Exception as e:
-                logger.error("截图留存清理失败（%s）：%s", day_name, e)
-                break
+                logger.error("截图留存清理失败（%s）：%s", name, e)
     except Exception as e:
         logger.error("截图留存检查失败：%s", e)
+
+
+def ensure_log_retention(log_file: str, keep_days: int, logger: logging.Logger) -> None:
+    """
+    清理日志文件：
+    - 按 log_file 所在目录中同名前缀（如 uuyc-monitor.log / uuyc-monitor.log.1）处理；
+    - 删除最后修改时间早于 keep_days 天窗口之外的日志。
+    """
+    try:
+        if keep_days <= 0:
+            logger.warning("日志留存天数配置无效（%s），跳过清理。", keep_days)
+            return
+
+        log_dir = os.path.dirname(log_file) or "."
+        base = os.path.basename(log_file)
+        prefix = base + "."
+        cutoff_dt = datetime.datetime.now() - datetime.timedelta(days=keep_days)
+
+        for name in os.listdir(log_dir):
+            if name != base and not name.startswith(prefix):
+                continue
+            path = os.path.join(log_dir, name)
+            if not os.path.isfile(path):
+                continue
+
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+            if mtime >= cutoff_dt:
+                continue
+
+            try:
+                os.remove(path)
+                logger.info("日志留存清理：已删除过期日志 %s（截止时间：%s）", path, cutoff_dt)
+            except Exception as e:
+                logger.error("日志留存清理失败（%s）：%s", path, e)
+    except Exception as e:
+        logger.error("日志留存检查失败：%s", e)
 
 
 def capture_fullscreen_to_jpg(root_dir: str, logger: logging.Logger) -> None:
@@ -844,6 +889,10 @@ def monitor_system(
         if now >= next_screenshot_time:
             capture_fullscreen_to_jpg(SCREENSHOT_SAVE_DIR, logger)
             ensure_screenshot_retention(SCREENSHOT_SAVE_DIR, SCREENSHOT_RETENTION_DAYS, logger)
+            ensure_log_retention(LOG_FILE, SCREENSHOT_RETENTION_DAYS, logger)
+            redirect_log = get_debug_console_redirect_log()
+            if os.path.abspath(redirect_log) != os.path.abspath(LOG_FILE):
+                ensure_log_retention(redirect_log, SCREENSHOT_RETENTION_DAYS, logger)
             next_screenshot_time = now + datetime.timedelta(minutes=SCREENSHOT_INTERVAL_MINUTES)
 
         # 离线模式：仅保活 + 截图，不执行其它监控/提醒逻辑
