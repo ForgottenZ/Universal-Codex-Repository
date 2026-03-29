@@ -8,7 +8,7 @@ import sys
 import time
 import struct
 from collections import deque
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from typing import List, Optional, Tuple
 
 import psutil
@@ -117,12 +117,15 @@ def setup_logging(debug: bool, debugnet_seconds: Optional[int]) -> logging.Logge
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
     # 主日志：仍然写到 APP_DIR 下
-    fh = RotatingFileHandler(
+    retention_days = max(int(SCREENSHOT_RETENTION_DAYS), 1)
+    fh = TimedRotatingFileHandler(
         LOG_FILE,
-        maxBytes=2 * 1024 * 1024,
-        backupCount=3,
+        when="midnight",
+        interval=1,
+        backupCount=retention_days,
         encoding="utf-8"
     )
+    fh.suffix = "%Y-%m-%d"
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
@@ -133,12 +136,14 @@ def setup_logging(debug: bool, debugnet_seconds: Optional[int]) -> logging.Logge
         if debugnet_seconds is not None:
             redirect_log = get_debug_console_redirect_log()
             try:
-                rh = RotatingFileHandler(
+                rh = TimedRotatingFileHandler(
                     redirect_log,
-                    maxBytes=2 * 1024 * 1024,
-                    backupCount=1,
+                    when="midnight",
+                    interval=1,
+                    backupCount=retention_days,
                     encoding="utf-8"
                 )
+                rh.suffix = "%Y-%m-%d"
                 rh.setFormatter(fmt)
                 logger.addHandler(rh)
             except Exception:
@@ -383,8 +388,21 @@ def ensure_log_retention(log_file: str, keep_days: int, logger: logging.Logger) 
             if not os.path.isfile(path):
                 continue
 
-            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
-            if mtime >= cutoff_dt:
+            # 优先按 TimedRotatingFileHandler 的日期后缀判断（例如 uuyc-monitor.log.2026-03-29）
+            expired = False
+            if name.startswith(prefix):
+                suffix = name[len(prefix):]
+                try:
+                    suffix_date = datetime.datetime.strptime(suffix, "%Y-%m-%d")
+                    expired = suffix_date < cutoff_dt
+                except ValueError:
+                    expired = False
+
+            # 非日期后缀文件回退到 mtime 判断（兼容历史文件）
+            if not expired:
+                mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+                expired = mtime < cutoff_dt
+            if not expired:
                 continue
 
             try:
