@@ -4,11 +4,11 @@ import datetime
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import time
+import struct
 from collections import deque
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from typing import List, Optional, Tuple
 
 import psutil
@@ -26,8 +26,8 @@ DEFAULT_MARKER_FILE = r"D:\uuyc-notify.luobo"
 TRAFFIC_HIGH_THRESHOLD_KB = 100   # KB/s，超过认为“连入开始”
 ZERO_THRESHOLD = 30               # 连续“近似0流量”的秒数，认为“连入结束”
 ZERO_KB_EPS = 1.0                 # <= 1KB/s 都当作 0（防止极小写入打断计数）
-TIMEOUT_MINUTES = 20              # 空闲超时提醒（分钟）
-SHUTDOWN_TRIGGER_TIMEOUT_HITS = 6  # 连续超时提醒次数达到该值后，触发关机流程（6 * 20min = 120min）
+TIMEOUT_MINUTES = 60              # 空闲超时提醒（分钟）
+SHUTDOWN_TRIGGER_TIMEOUT_HITS = 2  # 连续超时提醒次数达到该值后，触发关机流程（6 * 20min = 120min）
 SHUTDOWN_COMMAND_SECONDS = 120       # 达成阈值后直接执行 shutdown -s -t 120
 
 DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断初始是否已在连接中
@@ -38,7 +38,7 @@ DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断
 # - timeout_warning: 设备超时警告提醒
 # - shutdown_warning: 关机提醒（含弹窗与 push）
 REMINDER_ENABLED = {
-    "session_end": True,
+    "session_end": False,
     "timeout_warning": True,
     "shutdown_warning": True,
 }
@@ -117,12 +117,15 @@ def setup_logging(debug: bool, debugnet_seconds: Optional[int]) -> logging.Logge
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
     # 主日志：仍然写到 APP_DIR 下
-    fh = RotatingFileHandler(
+    retention_days = max(int(SCREENSHOT_RETENTION_DAYS), 1)
+    fh = TimedRotatingFileHandler(
         LOG_FILE,
-        maxBytes=2 * 1024 * 1024,
-        backupCount=3,
+        when="midnight",
+        interval=1,
+        backupCount=retention_days,
         encoding="utf-8"
     )
+    fh.suffix = "%Y-%m-%d"
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
@@ -133,12 +136,14 @@ def setup_logging(debug: bool, debugnet_seconds: Optional[int]) -> logging.Logge
         if debugnet_seconds is not None:
             redirect_log = get_debug_console_redirect_log()
             try:
-                rh = RotatingFileHandler(
+                rh = TimedRotatingFileHandler(
                     redirect_log,
-                    maxBytes=2 * 1024 * 1024,
-                    backupCount=1,
+                    when="midnight",
+                    interval=1,
+                    backupCount=retention_days,
                     encoding="utf-8"
                 )
+                rh.suffix = "%Y-%m-%d"
                 rh.setFormatter(fmt)
                 logger.addHandler(rh)
             except Exception:
@@ -327,62 +332,208 @@ def parse_debug_switches(argv: List[str]) -> set:
 
 def ensure_screenshot_retention(root_dir: str, keep_days: int, logger: logging.Logger) -> None:
     """
-    只保留最近 keep_days 个“日期文件夹”（yyyy-mm-dd）。
-    若超过则按日期从旧到新删除，直到数量 <= keep_days。
+    仅保留最近 keep_days 天（含今天）的“日期文件夹”（yyyy-mm-dd）。
+    示例：keep_days=90 时，今天是 03-29，则 03-28 必须保留，不应被删。
     """
     try:
+        if keep_days <= 0:
+            logger.warning("截图留存天数配置无效（%s），跳过清理。", keep_days)
+            return
+
         os.makedirs(root_dir, exist_ok=True)
-        day_dirs = []
+        cutoff_date = datetime.date.today() - datetime.timedelta(days=keep_days - 1)
         for name in os.listdir(root_dir):
             path = os.path.join(root_dir, name)
-            if os.path.isdir(path):
-                day_dirs.append((name, path))
+            if not os.path.isdir(path):
+                continue
 
-        day_dirs.sort(key=lambda x: x[0])  # yyyy-mm-dd 字符串可直接排序
-        while len(day_dirs) > keep_days:
-            day_name, day_path = day_dirs.pop(0)
             try:
-                shutil.rmtree(day_path)
-                logger.info("截图留存清理：已删除最早目录 %s", day_name)
+                folder_date = datetime.datetime.strptime(name, "%Y-%m-%d").date()
+            except ValueError:
+                logger.debug("截图留存清理：跳过非日期目录 %s", name)
+                continue
+
+            if folder_date >= cutoff_date:
+                continue
+
+            try:
+                shutil.rmtree(path)
+                logger.info("截图留存清理：已删除过期目录 %s（截止日期：%s）", name, cutoff_date)
             except Exception as e:
-                logger.error("截图留存清理失败（%s）：%s", day_name, e)
-                break
+                logger.error("截图留存清理失败（%s）：%s", name, e)
     except Exception as e:
         logger.error("截图留存检查失败：%s", e)
+
+
+def ensure_log_retention(log_file: str, keep_days: int, logger: logging.Logger) -> None:
+    """
+    清理日志文件：
+    - 按 log_file 所在目录中同名前缀（如 uuyc-monitor.log / uuyc-monitor.log.1）处理；
+    - 删除最后修改时间早于 keep_days 天窗口之外的日志。
+    """
+    try:
+        if keep_days <= 0:
+            logger.warning("日志留存天数配置无效（%s），跳过清理。", keep_days)
+            return
+
+        log_dir = os.path.dirname(log_file) or "."
+        base = os.path.basename(log_file)
+        prefix = base + "."
+        cutoff_dt = datetime.datetime.now() - datetime.timedelta(days=keep_days)
+
+        for name in os.listdir(log_dir):
+            if name != base and not name.startswith(prefix):
+                continue
+            path = os.path.join(log_dir, name)
+            if not os.path.isfile(path):
+                continue
+
+            # 优先按 TimedRotatingFileHandler 的日期后缀判断（例如 uuyc-monitor.log.2026-03-29）
+            expired = False
+            if name.startswith(prefix):
+                suffix = name[len(prefix):]
+                try:
+                    suffix_date = datetime.datetime.strptime(suffix, "%Y-%m-%d")
+                    expired = suffix_date < cutoff_dt
+                except ValueError:
+                    expired = False
+
+            # 非日期后缀文件回退到 mtime 判断（兼容历史文件）
+            if not expired:
+                mtime = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+                expired = mtime < cutoff_dt
+            if not expired:
+                continue
+
+            try:
+                os.remove(path)
+                logger.info("日志留存清理：已删除过期日志 %s（截止时间：%s）", path, cutoff_dt)
+            except Exception as e:
+                logger.error("日志留存清理失败（%s）：%s", path, e)
+    except Exception as e:
+        logger.error("日志留存检查失败：%s", e)
 
 
 def capture_fullscreen_to_jpg(root_dir: str, logger: logging.Logger) -> None:
     """
     全屏截图保存为：
-      指定目录/yyyy-mm-dd/HH-MM-SS.jpg
+      指定目录/yyyy-mm-dd/HH-MM-SS.bmp
     """
     now = datetime.datetime.now()
     day_dir = os.path.join(root_dir, now.strftime("%Y-%m-%d"))
     os.makedirs(day_dir, exist_ok=True)
-    target_file = os.path.join(day_dir, now.strftime("%H-%M-%S.jpg"))
+    target_file = os.path.join(day_dir, now.strftime("%H-%M-%S.bmp"))
 
-    # 使用 PowerShell + .NET 截图，避免引入第三方依赖
-    ps_script = rf"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bitmap.Save("{target_file}", [System.Drawing.Imaging.ImageFormat]::Jpeg)
-$graphics.Dispose()
-$bitmap.Dispose()
-"""
+    # 使用 Win32 GDI 直接截图，避免调用 PowerShell 时弹窗
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    SRCCOPY = 0x00CC0020
+
+    width = user32.GetSystemMetrics(0)
+    height = user32.GetSystemMetrics(1)
+    if width <= 0 or height <= 0:
+        logger.error("保存全屏截图失败：无效屏幕尺寸 %sx%s", width, height)
+        return
+
+    hdc_screen = None
+    hdc_mem = None
+    hbitmap = None
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-            check=True,
-            capture_output=True,
-            text=True
+        hdc_screen = user32.GetDC(0)
+        if not hdc_screen:
+            raise RuntimeError("GetDC 失败")
+
+        hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+        if not hdc_mem:
+            raise RuntimeError("CreateCompatibleDC 失败")
+
+        hbitmap = gdi32.CreateCompatibleBitmap(hdc_screen, width, height)
+        if not hbitmap:
+            raise RuntimeError("CreateCompatibleBitmap 失败")
+
+        if not gdi32.SelectObject(hdc_mem, hbitmap):
+            raise RuntimeError("SelectObject 失败")
+
+        if not gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY):
+            raise RuntimeError("BitBlt 失败")
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", ctypes.c_uint32),
+                ("biWidth", ctypes.c_int32),
+                ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16),
+                ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32),
+                ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32),
+                ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32),
+            ]
+
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth = width
+        bi.biHeight = height  # bottom-up
+        bi.biPlanes = 1
+        bi.biBitCount = 24
+        bi.biCompression = 0  # BI_RGB
+
+        row_stride = (width * 3 + 3) & ~3
+        image_size = row_stride * height
+        pixel_buf = ctypes.create_string_buffer(image_size)
+        DIB_RGB_COLORS = 0
+        scan_lines = gdi32.GetDIBits(
+            hdc_mem,
+            hbitmap,
+            0,
+            height,
+            pixel_buf,
+            ctypes.byref(bi),
+            DIB_RGB_COLORS
         )
+        if scan_lines != height:
+            raise RuntimeError(f"GetDIBits 失败，scan_lines={scan_lines}")
+
+        file_header = struct.pack(
+            "<2sIHHI",
+            b"BM",
+            14 + 40 + image_size,
+            0,
+            0,
+            14 + 40
+        )
+        info_header = struct.pack(
+            "<IIIHHIIIIII",
+            40,
+            width,
+            height,
+            1,
+            24,
+            0,
+            image_size,
+            0,
+            0,
+            0,
+            0
+        )
+
+        with open(target_file, "wb") as f:
+            f.write(file_header)
+            f.write(info_header)
+            f.write(pixel_buf.raw)
+
         logger.info("已保存全屏截图：%s", target_file)
     except Exception as e:
         logger.error("保存全屏截图失败：%s", e)
+    finally:
+        if hbitmap:
+            gdi32.DeleteObject(hbitmap)
+        if hdc_mem:
+            gdi32.DeleteDC(hdc_mem)
+        if hdc_screen:
+            user32.ReleaseDC(0, hdc_screen)
 
 
 def set_run_key(value: str, logger: logging.Logger) -> bool:
@@ -756,6 +907,10 @@ def monitor_system(
         if now >= next_screenshot_time:
             capture_fullscreen_to_jpg(SCREENSHOT_SAVE_DIR, logger)
             ensure_screenshot_retention(SCREENSHOT_SAVE_DIR, SCREENSHOT_RETENTION_DAYS, logger)
+            ensure_log_retention(LOG_FILE, SCREENSHOT_RETENTION_DAYS, logger)
+            redirect_log = get_debug_console_redirect_log()
+            if os.path.abspath(redirect_log) != os.path.abspath(LOG_FILE):
+                ensure_log_retention(redirect_log, SCREENSHOT_RETENTION_DAYS, logger)
             next_screenshot_time = now + datetime.timedelta(minutes=SCREENSHOT_INTERVAL_MINUTES)
 
         # 离线模式：仅保活 + 截图，不执行其它监控/提醒逻辑
