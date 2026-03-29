@@ -26,8 +26,8 @@ DEFAULT_MARKER_FILE = r"D:\uuyc-notify.luobo"
 TRAFFIC_HIGH_THRESHOLD_KB = 100   # KB/s，超过认为“连入开始”
 ZERO_THRESHOLD = 30               # 连续“近似0流量”的秒数，认为“连入结束”
 ZERO_KB_EPS = 1.0                 # <= 1KB/s 都当作 0（防止极小写入打断计数）
-TIMEOUT_MINUTES = 20              # 空闲超时提醒（分钟）
-SHUTDOWN_TRIGGER_TIMEOUT_HITS = 6  # 连续超时提醒次数达到该值后，触发关机流程（6 * 20min = 120min）
+TIMEOUT_MINUTES = 60              # 空闲超时提醒（分钟）
+SHUTDOWN_TRIGGER_TIMEOUT_HITS = 2  # 连续超时提醒次数达到该值后，触发关机流程（6 * 20min = 120min）
 SHUTDOWN_COMMAND_SECONDS = 120       # 达成阈值后直接执行 shutdown -s -t 120
 
 DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断初始是否已在连接中
@@ -38,7 +38,7 @@ DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断
 # - timeout_warning: 设备超时警告提醒
 # - shutdown_warning: 关机提醒（含弹窗与 push）
 REMINDER_ENABLED = {
-    "session_end": True,
+    "session_end": False,
     "timeout_warning": True,
     "shutdown_warning": True,
 }
