@@ -36,7 +36,7 @@ DEFAULT_STARTUP_CHECK_SECONDS = 60  # 启动时先监听多少秒，用于判断
 # 可配置项：
 # - session_end: 连入流程结束提醒
 # - timeout_warning: 设备超时警告提醒
-# - shutdown_warning: 关机提醒（含弹窗与 push）
+# - shutdown_warning: 关机提醒（仅 push）
 REMINDER_ENABLED = {
     "session_end": False,
     "timeout_warning": True,
@@ -290,19 +290,6 @@ def normalize_push_keys(push_key_value: object) -> List[str]:
         seen.add(key.lower())
         deduped.append(key)
     return deduped
-
-
-def show_shutdown_warning_popup(logger: logging.Logger) -> None:
-    msg = (
-        "设备已连续空闲超过 2 小时（6 次 20 分钟）。\n"
-        f"系统已执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。"
-    )
-    title = "UUYC Monitor 关机提醒"
-    try:
-        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x30)  # MB_ICONWARNING
-        logger.warning("已显示关机提醒弹窗。")
-    except Exception as e:
-        logger.error("显示关机提醒弹窗失败：%s", e)
 
 
 def schedule_forced_shutdown(logger: logging.Logger) -> None:
@@ -887,17 +874,16 @@ def monitor_system(
             logger.warning("[DEBUG] --debug-shutdown 已请求，但当前为离线模式，按规则跳过。")
         else:
             shutdown_scheduled = True
-            logger.warning("[DEBUG] --debug-shutdown 已启用：立即触发关机提醒与关机命令测试。")
+            logger.warning("[DEBUG] --debug-shutdown 已启用：立即触发关机命令测试。")
+            schedule_forced_shutdown(logger)
             if is_reminder_enabled("shutdown_warning") and (not is_offline_mode()):
-                show_shutdown_warning_popup(logger)
                 send_pushdeer(
                     "关机提醒（DEBUG）",
                     f"已触发 --debug-shutdown，执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
                     logger=logger
                 )
             else:
-                logger.info("提醒关闭或离线模式：跳过 DEBUG 关机提醒弹窗与推送。")
-            schedule_forced_shutdown(logger)
+                logger.info("提醒关闭或离线模式：跳过 DEBUG 关机提醒推送。")
 
     # 1) 正常监控循环
     while True:
@@ -993,16 +979,15 @@ def monitor_system(
 
                 if (not shutdown_scheduled) and timeout_hits >= SHUTDOWN_TRIGGER_TIMEOUT_HITS:
                     shutdown_scheduled = True
+                    schedule_forced_shutdown(logger)
                     if is_reminder_enabled("shutdown_warning") and (not is_offline_mode()):
-                        show_shutdown_warning_popup(logger)
                         send_pushdeer(
                             "关机提醒",
                             f"设备已连续空闲超过 2 小时，已执行 shutdown -s -t {SHUTDOWN_COMMAND_SECONDS}。",
                             logger=logger
                         )
                     else:
-                        logger.info("提醒关闭或离线模式：跳过关机提醒弹窗与推送。")
-                    schedule_forced_shutdown(logger)
+                        logger.info("提醒关闭或离线模式：跳过关机提醒推送。")
 
                 timeout_timer_start = datetime.datetime.now()
 
